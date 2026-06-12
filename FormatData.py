@@ -2,13 +2,14 @@ import uproot
 import numpy as np
 import matplotlib.pyplot as plot
 from sklearn.preprocessing import StandardScaler
-
+import os
 
 outputDir = '../FormattedData/'
-recoFile = uproot.open("NuMuCC0pi_reco_v2.root")
-truthFile = uproot.open("NuMuCC0pi_true_v2.root")
-recoWeightsFile = uproot.open("NuMuCC0pi_reco_v2_weights.root")
-truthWeightsFile = uproot.open("NuMuCC0pi_true_v2_weights.root")
+os.makedirs(outputDir, exist_ok=True)
+recoFile = uproot.open("/exp/sbnd/data/users/castalyf/Omnifold_data/t2k-nd280-numu-cc0pi-training-sample/NuMuCC0pi_reco_v2.root")
+truthFile = uproot.open("/exp/sbnd/data/users/castalyf/Omnifold_data/t2k-nd280-numu-cc0pi-training-sample/NuMuCC0pi_true_v2.root")
+recoWeightsFile = uproot.open("/exp/sbnd/data/users/castalyf/Omnifold_data/t2k-nd280-numu-cc0pi-training-sample/NuMuCC0pi_reco_v2_weights.root")
+truthWeightsFile = uproot.open("/exp/sbnd/data/users/castalyf/Omnifold_data/t2k-nd280-numu-cc0pi-training-sample/NuMuCC0pi_true_v2_weights.root")
 
 reco = dict()
 for val in recoFile['selectedEvents'].keys():

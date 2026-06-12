@@ -1,0 +1,18 @@
+{
+    'FILE_MC_RECO':'mc_vals_reco.npy',
+    'FILE_MC_GEN':'mc_vals_truth.npy',
+    'FILE_MC_FLAG_RECO':'mc_pass_reco.npy',
+    'FILE_MC_FLAG_GEN':'mc_pass_truth.npy',
+    'FILE_DATA_RECO':'mc_vals_reco.npy',
+    'FILE_DATA_FLAG_RECO':'mc_pass_reco.npy',
+    'FILE_DATA_WEIGHT':'data_weights_fakedata_pmu_tilt.npy',
+    'FILE_MC_RECO_WEIGHT':'mc_weights_reco.npy',
+    'FILE_MC_GEN_WEIGHT':'mc_weights_truth.npy',
+    'NITER': 15,
+    'NTRIAL':3,
+    'LR': 1e-4,
+    'BATCH_SIZE': 4096,
+    'EPOCHS': 50,
+    'NAME':'t2k_FakeData_pmuTilt',
+    'NPATIENCE': 7,
+    }

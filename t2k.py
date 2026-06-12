@@ -2,8 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 import os
-import horovod.tensorflow.keras as hvd
-#import tensorflow.keras as hvd
+# import horovod.tensorflow.keras as hvd
+import tensorflow.keras as hvd
 import tensorflow as tf
 import utils
 from omnifold import  Multifold,LoadJson
@@ -11,13 +11,13 @@ import tensorflow.keras.backend as K
 
 utils.SetStyle()
 
-hvd.init()
+# hvd.init()  # not needed for single node
 # Horovod: pin GPU to be used to process local rank (one GPU per process)
 gpus = tf.config.experimental.list_physical_devices('GPU')
 for gpu in gpus:
     tf.config.experimental.set_memory_growth(gpu, True)
 if gpus:
-    tf.config.experimental.set_visible_devices(gpus[hvd.local_rank()], 'GPU')
+    tf.config.experimental.set_visible_devices(gpus[0], 'GPU')  # just use first GPU
 
 
 parser = argparse.ArgumentParser()

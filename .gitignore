@@ -1,8 +1,24 @@
-__pycache__/
-*.pyc
-*.log
-
+# Virtual environments
+venv_omnifold/
 test/
-venv/
-env/
 .venv/
+
+# Output directories (large weight files + plots)
+weights_*/
+plots_*/
+FormattedData*/
+__pycache__/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+nohup.out
+
+# Compiled python
+*.pyc
+
+# OS files
+.DS_Store
+*.swp

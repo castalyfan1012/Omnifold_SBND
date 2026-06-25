@@ -10,14 +10,16 @@ Usage:
     python3 sbnd/RunSystematicUniverses.py --source genie --start 0 --end 100
 """
 
+
 import numpy as np
 import subprocess
+import sys
 import os
 import json
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--source', choices=['bnb', 'genie'], required=True)
+parser.add_argument('--source', choices=['bnb', 'genie', 'mcstat'], required=True)
 parser.add_argument('--start', type=int, default=0)
 parser.add_argument('--end', type=int, default=100)
 parser.add_argument('--data-dir', type=str, default='../FormattedData_SBND/')
@@ -25,7 +27,7 @@ parser.add_argument('--universe-file', type=str, default=None)
 flags = parser.parse_args()
 
 if flags.universe_file is None:
-    flags.universe_file = f'sbnd/exported_weights/{flags.source}_universe_weights_6399.npy'
+    flags.universe_file = f'sbnd/exported_weights/{flags.source}_universe_weights.npy'
 
 uni_all = np.load(flags.universe_file)   # (6399, 100)
 mc_weights = np.load(flags.data_dir + 'mc_weights_reco.npy')
@@ -87,11 +89,11 @@ for idx in range(flags.start, flags.end):
     print(f"{'='*60}")
 
     cmd = [
-        'python', 't2k.py',
+        sys.executable, 't2k.py',
         '--config', config_path,
         '--file_path', flags.data_dir,
         '--weights_folder', weights_dir,
-        '--plot_folder', plots_dir,
+        # '--plot_folder', plots_dir,
         '--no_eff', '--verbose'
     ]
     subprocess.run(cmd)

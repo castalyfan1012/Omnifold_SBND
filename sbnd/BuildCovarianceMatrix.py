@@ -4,6 +4,11 @@ BuildCovarianceMatrix.py
 Collects push weights from all systematic universe runs, builds
 covariance matrices, and computes chi2 vs iteration convergence.
 
+Iteration convention (matching Huang et al. 2025, Fig 4):
+  Iteration 0 = prior (no unfolding, push weights = 1)
+  Iteration 1 = after first OmniFold pass
+  Iteration N = after N-th pass
+
 Usage:
     python3 sbnd/BuildCovarianceMatrix.py --source bnb --var true_ke
     python3 sbnd/BuildCovarianceMatrix.py --source genie --var true_costheta
@@ -57,14 +62,9 @@ def iter_num(p):
     m = re.search(r'Iter(\d+)', p)
     return int(m.group(1)) if m else -1
 
-def chi2_poisson(observed, expected):
-    mask = expected > 0
-    return np.sum((observed[mask] - expected[mask])**2 / expected[mask])
-
 # ── Determine sources ────────────────────────────────────────────────────────
 if flags.source == 'all':
     sources = ['bnb', 'genie', 'mcstat']
-    # Only include sources that actually have weight files
     sources = [s for s in sources
                if glob.glob(f'{flags.weights_base}/weights_{s}/{s}_univ*/Step2_Iter*_PushWeights.npy')]
 else:
@@ -72,13 +72,12 @@ else:
 
 # ── Collect universe push weights (final iteration) ──────────────────────────
 all_hists = []
-all_univ_dirs_by_source = {}   # for chi2 vs iteration later
+all_univ_dirs_by_source = {}
 
 for src in sources:
     pattern = f'{flags.weights_base}/weights_{src}/{src}_univ*/Step2_Iter*_PushWeights.npy'
     push_files = sorted(glob.glob(pattern))
 
-    # Group by universe, take last iteration
     univ_files = {}
     for f in push_files:
         m = re.search(r'univ(\d+)', f)
@@ -91,7 +90,6 @@ for src in sources:
 
     print(f"{src}: {len(univ_files)} universes found")
 
-    # Store universe dirs for chi2-vs-iteration analysis
     univ_dirs = sorted(glob.glob(f'{flags.weights_base}/weights_{src}/{src}_univ*/'))
     all_univ_dirs_by_source[src] = univ_dirs
 
@@ -217,13 +215,17 @@ plt.tight_layout()
 plt.savefig(f'{flags.plot_dir}/universe_spread_{flags.source}_{flags.var}.png', dpi=150)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Plot 4: Chi2 vs iteration (convergence diagnostic)
+# Plot 4: Chi2 vs iteration (covariance method)
+#
+# Convention (matching Huang et al. 2025, Fig 4):
+#   Iteration 0 = prior (no unfolding)
+#   Iteration N = after N-th OmniFold pass
+#   File Iter0 in omnifold.py = our iteration 1
 # ══════════════════════════════════════════════════════════════════════════════
 print(f"\n{'='*60}")
 print(f"Chi2 vs iteration (covariance method)")
 print(f"{'='*60}")
 
-# Determine max iteration
 sample_dirs = list(all_univ_dirs_by_source.values())[0]
 if sample_dirs:
     sample_files = sorted(glob.glob(sample_dirs[0] + 'Step2_Iter*_PushWeights.npy'), key=iter_num)
@@ -231,55 +233,42 @@ if sample_dirs:
 else:
     max_iter = 0
 
-if max_iter > 0:
+if max_iter >= 0:
     ndf = n_bins - 1
-    iters_list = list(range(max_iter + 1))
+    file_iters = list(range(max_iter + 1))   # 0, 1, ..., max_iter in file naming
 
-    # Collect all universe directories across all sources
     all_udirs = []
     for src in sources:
         all_udirs.extend(all_univ_dirs_by_source.get(src, []))
 
-    chi2_per_iter = []
-
-    print(f"\n  {'Iter':>5s} {'chi2':>10s} {'chi2/ndf':>10s} {'ndf':>6s}")
-
-    # Add "no unfolding" point (iteration -1): push weights = 1
-    # Use same covariance from iteration 0 for comparison
-    hists_iter0 = []
+    # --- Compute prior chi2 (iteration 0 in paper convention) ---
+    # Prior = no unfolding (push weights = 1). Use iter-0 covariance for scale.
+    hists_iter0_unfolded = []
     for udir in all_udirs:
-        push_file = glob.glob(udir + f'Step2_Iter0_*_PushWeights.npy')
+        push_file = glob.glob(udir + 'Step2_Iter0_*_PushWeights.npy')
         if not push_file:
             continue
-        # For "no unfolding", use unit weights instead of push weights
-        h_nom, _ = np.histogram(var_vals, bins=bins, weights=mc_weights)
-        hists_iter0.append(h_nom)  # all identical = nominal
+        push = np.load(push_file[0])
+        push = push if push.ndim == 1 else push.mean(axis=0)
+        h, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * push)
+        hists_iter0_unfolded.append(h)
 
-    # The "prior" chi2: how far is nominal from the mean of universe iter-0 results
-    if len(hists_iter0) >= 2:
-        hists_arr_0 = []
-        for udir in all_udirs:
-            push_file = glob.glob(udir + f'Step2_Iter0_*_PushWeights.npy')
-            if not push_file:
-                continue
-            push = np.load(push_file[0])
-            push = push if push.ndim == 1 else push.mean(axis=0)
-            h, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * push)
-            hists_arr_0.append(h)
-        hists_arr_0 = np.array(hists_arr_0)
+    c2_prior = float('nan')
+    if len(hists_iter0_unfolded) >= 2:
+        hists_arr_0 = np.array(hists_iter0_unfolded)
         diff_0 = hists_arr_0 - hists_arr_0.mean(axis=0)
-        cov_0  = (diff_0.T @ diff_0) / len(hists_arr_0)
+        cov_0 = (diff_0.T @ diff_0) / len(hists_arr_0)
         cov_0_reg = cov_0 + np.eye(n_bins) * 1e-6 * np.diag(cov_0).mean()
         try:
             cov_0_inv = np.linalg.inv(cov_0_reg)
             delta_prior = nom_hist - hists_arr_0.mean(axis=0)
             c2_prior = float(delta_prior @ cov_0_inv @ delta_prior)
         except np.linalg.LinAlgError:
-            c2_prior = float('nan')
-        print(f"  {'prior':>5s} {c2_prior:10.2f} {c2_prior/ndf:10.4f} {ndf:6d}  (no unfolding)")
+            pass
 
-    for it in iters_list:
-        # Collect unfolded histogram for each universe at this iteration
+    # --- Compute chi2 at each OmniFold pass ---
+    chi2_per_iter = []
+    for it in file_iters:
         hists_this_iter = []
         for udir in all_udirs:
             push_file = glob.glob(udir + f'Step2_Iter{it}_*_PushWeights.npy')
@@ -291,16 +280,13 @@ if max_iter > 0:
             hists_this_iter.append(h)
 
         if len(hists_this_iter) < 2:
-            chi2_per_iter.append(0)
-            print(f"  {it:5d} {'N/A':>10s} {'N/A':>10s} {ndf:6d}  (too few universes)")
+            chi2_per_iter.append(float('nan'))
             continue
 
-        hists_arr = np.array(hists_this_iter)   # (N_univ, N_bins)
-        mu   = hists_arr.mean(axis=0)           # mean unfolded result
-        diff = hists_arr - mu[np.newaxis, :]
-        cov_iter = (diff.T @ diff) / len(hists_arr)
-
-        # Regularize: add small diagonal to prevent singular matrix
+        hists_arr = np.array(hists_this_iter)
+        mu = hists_arr.mean(axis=0)
+        diff_it = hists_arr - mu[np.newaxis, :]
+        cov_iter = (diff_it.T @ diff_it) / len(hists_arr)
         cov_reg = cov_iter + np.eye(n_bins) * 1e-6 * np.diag(cov_iter).mean()
 
         try:
@@ -311,19 +297,33 @@ if max_iter > 0:
             c2 = float('nan')
 
         chi2_per_iter.append(c2)
-        print(f"  {it:5d} {c2:10.2f} {c2/ndf:10.4f} {ndf:6d}")
 
-    # Plot
+    # --- Print with paper convention: prior=0, file_iter0=1, etc ---
+    paper_iters = [0] + [it + 1 for it in file_iters]
+    paper_chi2  = [c2_prior] + chi2_per_iter
+
+    print(f"\n  {'Iter':>5s} {'chi2':>10s} {'chi2/ndf':>10s} {'ndf':>6s}")
+    for pi, c2 in zip(paper_iters, paper_chi2):
+        note = '  (prior, no unfolding)' if pi == 0 else ''
+        if np.isnan(c2):
+            print(f"  {pi:5d} {'N/A':>10s} {'N/A':>10s} {ndf:6d}{note}")
+        else:
+            print(f"  {pi:5d} {c2:10.2f} {c2/ndf:10.4f} {ndf:6d}{note}")
+
+    # --- Plot ---
     fig4, ax4 = plt.subplots(figsize=(8, 5))
-    ax4.plot(iters_list, chi2_per_iter, 'ro-', linewidth=2, markersize=6,
-             label=r'$\chi^2 = (\mu - \mathrm{nom})^T\, C^{-1}\, (\mu - \mathrm{nom})$')
-    # ax4.axhline(ndf, color='gray', linestyle=':', linewidth=1,
-    #             label=f'ndf = {ndf}')
-    ax4.set_xlabel('OmniFold iteration')
+    valid = [(pi, c2) for pi, c2 in zip(paper_iters, paper_chi2) if not np.isnan(c2)]
+    if valid:
+        vi, vc = zip(*valid)
+        ax4.plot(vi, vc, 'ro-', linewidth=2, markersize=6,
+                 label=r'$\chi^2 = (\mu - \mathrm{nom})^T\, C^{-1}\, (\mu - \mathrm{nom})$')
+
+    ax4.set_xlabel('OmniFold Iteration')
     ax4.set_ylabel(r'$\chi^2$')
     ax4.set_title(f'Convergence: {flags.var} ({flags.source}, {len(all_udirs)} universes)')
     ax4.legend(fontsize=9)
-    ax4.set_xticks(iters_list)
+    if valid:
+        ax4.set_xticks(list(vi))
     plt.tight_layout()
     plt.savefig(f'{flags.plot_dir}/chi2_vs_iter_{flags.source}_{flags.var}.png', dpi=150)
     print(f"\nSaved {flags.plot_dir}/chi2_vs_iter_{flags.source}_{flags.var}.png")

@@ -28,7 +28,7 @@ Omnifold_SBND/
 │   ├── RunSystematicUniverses.py
 │   ├── BuildCovarianceMatrix.py
 │   ├── ExtractXsec.py
-│   ├── PaperStylePlots.py
+│   ├── PlotResults.py
 │   ├── config_omnifold_sbnd_closure.json
 │   ├── config_omnifold_sbnd_fakedata_tilt.json
 │   ├── runOmnifold_sbnd_closure.sh
@@ -84,7 +84,7 @@ python3 sbnd/BuildCovarianceMatrix.py --source all --var true_costheta
 python3 sbnd/ExtractXsec.py --var both
 
 # 7. Paper-style presentation plots
-python3 sbnd/PaperStylePlots.py --var both
+python3 sbnd/PlotResults.py --var both
 ```
 
 ---
@@ -199,7 +199,7 @@ Produces dσ/dKE and dσ/dcosθ with systematic bands. Currently shape-only; set
 ### Step 6: Paper-style presentation plots
 
 ```bash
-python3 sbnd/PaperStylePlots.py --var both
+python3 sbnd/PlotResults.py --var both
 ```
 
 Produces plots matching [Huang et al. (2025)](https://arxiv.org/abs/2504.06857):

@@ -169,15 +169,14 @@ for ax, var_name, var_vals in [(axes4[0], 'true_ke', true_ke),
     # Print table
     print(f"\n  {var_name}:")
     print(f"  {'Iter':>5s} {'chi2':>10s} {'chi2/ndf':>10s}")
-    print(f"  {'nom':>5s} {chi2_nom:10.2f} {chi2_nom/ndf:10.4f}  (no unfolding)")
+    print(f"  {0:5d} {chi2_nom:10.2f} {chi2_nom/ndf:10.4f}  (prior, no unfolding)")
     for it, c2 in zip(iters, chi2s):
-        print(f"  {it:5d} {c2:10.2f} {c2/ndf:10.4f}")
+        print(f"  {it+1:5d} {c2:10.2f} {c2/ndf:10.4f}")
 
     # Plot
-    ax.plot(iters, chi2s, 'ro-', linewidth=2, markersize=6,
-            label='OmniFold unfolded')
-    ax.axhline(chi2_nom, color='blue', linestyle='--', linewidth=1.5,
-               label=f'No unfolding: {chi2_nom:.1f}')
+    iters_shifted = [it + 1 for it in iters]
+    ax.plot([0] + iters_shifted, [chi2_nom/ndf] + chi2s, 'ro-',
+            linewidth=2, markersize=6, label='OmniFold')
     ax.axhline(ndf, color='gray', linestyle=':', linewidth=1,
                label=f'ndf = {ndf}')
     ax.set_xlabel('OmniFold iteration')

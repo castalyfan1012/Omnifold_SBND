@@ -28,7 +28,7 @@ parser.add_argument('--data-dir', type=str, default='../FormattedData_SBND/')
 parser.add_argument('--weights-base', type=str, default='sbnd',
                     help='Base directory containing weights_{source}/ subdirs')
 parser.add_argument('--plot-dir', type=str, default='sbnd/plots_systematics/')
-parser.add_argument('--var', choices=['true_ke', 'true_costheta'], default='true_ke')
+parser.add_argument('--var', choices=['true_p', 'true_costheta'], default='true_p')
 flags = parser.parse_args()
 
 os.makedirs(flags.plot_dir, exist_ok=True)
@@ -36,10 +36,12 @@ os.makedirs(flags.plot_dir, exist_ok=True)
 # ── Binning ───────────────────────────────────────────────────────────────────
 BINNING = {
     'true_ke':       np.array([0, 200, 400, 600, 800, 1000, 1400, 2000]),
+    'true_p':        np.array([0, 200, 400, 600, 800, 1000, 1400, 2000]),
     'true_costheta': np.linspace(-1, 1, 11),
 }
 XLABEL = {
     'true_ke':       r'True electron KE [MeV]',
+    'true_p':        r'True electron momentum [MeV/c]',
     'true_costheta': r'True $\cos\theta_e$',
 }
 
@@ -52,7 +54,7 @@ centers = 0.5 * (bins[:-1] + bins[1:])
 truth_raw  = np.load(flags.data_dir + 'mc_vals_truth_NoNorm.npy')
 mc_weights = np.load(flags.data_dir + 'mc_weights_reco.npy')
 
-var_idx  = 0 if flags.var == 'true_ke' else 1
+var_idx = 0 if flags.var == 'true_p' else 1
 var_vals = truth_raw[:, var_idx]
 
 nom_hist, _ = np.histogram(var_vals, bins=bins, weights=mc_weights)

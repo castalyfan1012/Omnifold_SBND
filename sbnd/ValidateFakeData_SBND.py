@@ -2,11 +2,11 @@
 ValidateFakeData_SBND.py
 
 Validates OmniFold push weight recovery against injected distortion.
+Variables: true_p (col 0), true_costheta (col 1).
 Includes chi2 vs iteration convergence diagnostic.
 
 Usage:
     python3 sbnd/ValidateFakeData_SBND.py --tag tilt_alpha0.5
-    python3 sbnd/ValidateFakeData_SBND.py --tag bnb_univ0
 """
 
 import numpy as np
@@ -14,11 +14,9 @@ import matplotlib.pyplot as plt
 import glob, re, os, argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--tag', type=str, required=True,
-                    help='Tag matching the fake data run (e.g. tilt_alpha0.5, bnb_univ0)')
+parser.add_argument('--tag', type=str, required=True)
 parser.add_argument('--data-dir', type=str, default='../FormattedData_SBND/')
-parser.add_argument('--weights-dir', type=str, default=None,
-                    help='Override weights directory (default: weights_sbnd_fakedata_{tag}/)')
+parser.add_argument('--weights-dir', type=str, default=None)
 parser.add_argument('--plot-dir', type=str, default=None)
 flags = parser.parse_args()
 
@@ -28,25 +26,26 @@ WEIGHTS_DIR = flags.weights_dir or f'weights_sbnd_fakedata_{TAG}/'
 PLOT_DIR    = flags.plot_dir or f'plots_sbnd_fakedata_{TAG}/'
 os.makedirs(PLOT_DIR, exist_ok=True)
 
-# ── Binning ───────────────────────────────────────────────────────────────────
+# Binning: primary variables are p and costheta
 BINNING = {
-    'true_ke':       np.array([0, 200, 400, 600, 800, 1000, 1400, 2000]),
+    'true_p':        np.array([0, 200, 400, 600, 800, 1000, 1400, 2000]),
     'true_costheta': np.linspace(-1, 1, 11),
 }
 XLABEL = {
-    'true_ke':       r'True electron KE [MeV]',
+    'true_p':        r'True electron momentum [MeV/c]',
     'true_costheta': r'True $\cos\theta_e$',
 }
+VAR_COLS = {'true_p': 0, 'true_costheta': 1}
 
-# ── Load data ─────────────────────────────────────────────────────────────────
-truth_raw      = np.load(DATA_DIR + 'mc_vals_truth_NoNorm.npy')
-mc_weights     = np.load(DATA_DIR + 'mc_weights_reco.npy')
-injected_tilt  = np.load(DATA_DIR + f'truth_weights_sbnd_fakedata_{TAG}.npy')
+# ── Load ──────────────────────────────────────────────────────────────────────
+truth_raw     = np.load(DATA_DIR + 'mc_vals_truth_NoNorm.npy')
+mc_weights    = np.load(DATA_DIR + 'mc_weights_reco.npy')
+injected_tilt = np.load(DATA_DIR + f'truth_weights_sbnd_fakedata_{TAG}.npy')
 
-true_ke       = truth_raw[:, 0]
+# [0]=true_p, [1]=true_costheta (set by FormatData_SBND.py)
+true_p        = truth_raw[:, 0]
 true_costheta = truth_raw[:, 1]
 
-# ── Load ALL iteration push/pull weights ──────────────────────────────────────
 def iter_num(p):
     m = re.search(r'Iter(\d+)', p)
     return int(m.group(1)) if m else -1
@@ -58,18 +57,13 @@ if not push_files:
     print(f"ERROR: No push weight files in {WEIGHTS_DIR}")
     exit(1)
 
-# Final iteration weights
-push_final = np.load(push_files[-1])
-pull_final = np.load(pull_files[-1])
-push_mean = push_final if push_final.ndim == 1 else push_final.mean(axis=0)
-pull_mean = pull_final if pull_final.ndim == 1 else pull_final.mean(axis=0)
-
 print(f"Push file (final): {push_files[-1]}")
-print(f"Pull file (final): {pull_files[-1]}")
+push_final = np.load(push_files[-1])
+push_mean  = push_final if push_final.ndim == 1 else push_final.mean(axis=0)
+
 print(f"Push:     mean={push_mean.mean():.4f}, std={push_mean.std():.4f}")
 print(f"Injected: mean={injected_tilt.mean():.4f}, std={injected_tilt.std():.4f}")
 
-# ── Helper functions ──────────────────────────────────────────────────────────
 def binned_mean(x, w, bins):
     out = np.zeros(len(bins) - 1)
     for i in range(len(bins) - 1):
@@ -78,14 +72,14 @@ def binned_mean(x, w, bins):
             out[i] = np.average(w[mask])
     return out
 
-def chi2_poisson(observed, expected):
-    """Pearson chi2 with Poisson-like variance."""
-    mask = expected > 0
-    return np.sum((observed[mask] - expected[mask])**2 / expected[mask])
+def chi2_simple(obs, exp):
+    mask = exp > 0
+    return np.sum((obs[mask] - exp[mask])**2 / exp[mask])
 
+# ── Plot 1 & 2: Push weight recovery for each variable ──────────────────────
+var_data = {'true_p': true_p, 'true_costheta': true_costheta}
 
-# ── Plot 1: Push weight recovery vs true_ke ──────────────────────────────────
-for var_name, var_vals in [('true_ke', true_ke), ('true_costheta', true_costheta)]:
+for var_name, var_vals in var_data.items():
     bins    = BINNING[var_name]
     xlabel  = XLABEL[var_name]
     centers = 0.5 * (bins[:-1] + bins[1:])
@@ -114,11 +108,9 @@ for var_name, var_vals in [('true_ke', true_ke), ('true_costheta', true_costheta
     plt.savefig(f'{PLOT_DIR}/recovery_{var_name}.png', dpi=150)
     print(f"Saved {PLOT_DIR}/recovery_{var_name}.png")
 
-
-# ── Plot 2: Unfolded distributions ──────────────────────────────────────────
+# ── Plot 3: Unfolded distributions (both variables side by side) ─────────────
 fig3, axes3 = plt.subplots(1, 2, figsize=(12, 5))
-for ax, var_name, var_vals in [(axes3[0], 'true_ke', true_ke),
-                                (axes3[1], 'true_costheta', true_costheta)]:
+for ax, (var_name, var_vals) in zip(axes3, var_data.items()):
     bins   = BINNING[var_name]
     xlabel = XLABEL[var_name]
     ax.hist(var_vals, bins=bins, weights=mc_weights,                   alpha=0.5, label='Nominal MC')
@@ -127,74 +119,65 @@ for ax, var_name, var_vals in [(axes3[0], 'true_ke', true_ke),
     ax.set_xlabel(xlabel)
     ax.set_ylabel('Weighted events')
     ax.legend(fontsize=9)
-    ax.set_title(f'Unfolded distribution: {var_name}')
+    ax.set_title(f'Unfolded: {var_name}')
 plt.tight_layout()
 plt.savefig(f'{PLOT_DIR}/unfolded_distributions.png', dpi=150)
 print(f"Saved {PLOT_DIR}/unfolded_distributions.png")
 
-
-# ── Plot 3: Chi2 vs iteration (convergence diagnostic) ──────────────────────
+# ── Plot 4: Chi2 vs iteration (both variables, paper convention) ─────────────
 print(f"\n{'='*60}")
 print(f"Chi2 vs iteration convergence")
 print(f"{'='*60}")
+print(f"(Iter 0 = prior, Iter N = after N-th OmniFold pass)")
 
 fig4, axes4 = plt.subplots(1, 2, figsize=(12, 5))
 
-for ax, var_name, var_vals in [(axes4[0], 'true_ke', true_ke),
-                                (axes4[1], 'true_costheta', true_costheta)]:
+for ax, (var_name, var_vals) in zip(axes4, var_data.items()):
     bins = BINNING[var_name]
-    ndf  = len(bins) - 2   # nbins - 1 (constraint)
+    ndf  = len(bins) - 2
 
-    # "Truth" = MC weighted by injected tilt
     truth_hist, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * injected_tilt)
+    nom_hist, _   = np.histogram(var_vals, bins=bins, weights=mc_weights)
 
-    # Nominal chi2 (no unfolding at all)
-    chi2_nom = chi2_poisson(
-        np.histogram(var_vals, bins=bins, weights=mc_weights)[0],
-        truth_hist
-    )
+    chi2_prior = chi2_simple(nom_hist, truth_hist) / ndf
 
-    # Chi2 at each iteration
-    iters  = []
-    chi2s  = []
+    paper_iters = [0]
+    paper_chi2  = [chi2_prior]
+
+    print(f"\n  {var_name}:")
+    print(f"  {'Iter':>5s} {'chi2/ndf':>10s}")
+    print(f"  {'0':>5s} {chi2_prior:10.4f}  (prior)")
+
     for f in push_files:
         it = iter_num(f)
         push = np.load(f)
         push = push if push.ndim == 1 else push.mean(axis=0)
-        unfolded, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * push)
-        c2 = chi2_poisson(unfolded, truth_hist)
-        iters.append(it)
-        chi2s.append(c2)
+        h, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * push)
+        c2 = chi2_simple(h, truth_hist) / ndf
+        paper_iters.append(it + 1)
+        paper_chi2.append(c2)
+        print(f"  {it+1:5d} {c2:10.4f}")
 
-    # Print table
-    print(f"\n  {var_name}:")
-    print(f"  {'Iter':>5s} {'chi2':>10s} {'chi2/ndf':>10s}")
-    print(f"  {0:5d} {chi2_nom:10.2f} {chi2_nom/ndf:10.4f}  (prior, no unfolding)")
-    for it, c2 in zip(iters, chi2s):
-        print(f"  {it+1:5d} {c2:10.2f} {c2/ndf:10.4f}")
-
-    # Plot
-    iters_shifted = [it + 1 for it in iters]
-    ax.plot([0] + iters_shifted, [chi2_nom/ndf] + chi2s, 'ro-',
-            linewidth=2, markersize=6, label='OmniFold')
-    ax.axhline(ndf, color='gray', linestyle=':', linewidth=1,
-               label=f'ndf = {ndf}')
-    ax.set_xlabel('OmniFold iteration')
-    ax.set_ylabel(r'$\chi^2$ (unfolded vs injected truth)')
-    ax.set_title(f'{var_name}')
+    ax.plot(paper_iters, paper_chi2, 'ro-', linewidth=2, markersize=5,
+            label=var_name.replace('_', ' '))
+    ax.axhline(1.0, color='gray', linestyle=':', linewidth=1)
+    ax.set_xlabel('OmniFold Iteration')
+    ax.set_ylabel(r'$\chi^2$/DoF')
+    ax.set_title(var_name)
     ax.legend(fontsize=9)
-    ax.set_xticks(iters)
+    ax.set_yscale('log')
+    ax.set_ylim(0.1, max(paper_chi2) * 2)
+    ax.set_xlim(-0.5, max(paper_iters) + 0.5)
 
-plt.suptitle(f'Convergence: {TAG}', fontsize=13, y=1.02)
+plt.suptitle(f'Convergence: {TAG}', fontsize=13)
 plt.tight_layout()
 plt.savefig(f'{PLOT_DIR}/chi2_vs_iterations.png', dpi=150)
 print(f"\nSaved {PLOT_DIR}/chi2_vs_iterations.png")
 
-
-# ── Iteration convergence summary ────────────────────────────────────────────
-print(f"\n=== Iteration convergence (push weight stats) ===")
+# ── Summary ───────────────────────────────────────────────────────────────────
+print(f"\n=== Push weight stats per iteration ===")
 for f in push_files:
     w = np.load(f)
     w = w if w.ndim == 1 else w.mean(axis=0)
     it = iter_num(f)
-    print(f"  Iter {it:2d}: mean={w.mean():.4f}, std={w.std():.4f}")
+    print(f"  Iter {it+1:2d}: mean={w.mean():.4f}, std={w.std():.4f}")

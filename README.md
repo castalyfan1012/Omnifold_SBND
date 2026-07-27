@@ -12,221 +12,210 @@ Omnifold_SBND/
 ├── t2k.py                      # Training driver script
 │
 ├── t2k/                        # T2K validation files
-│   ├── FormatData.py
-│   ├── MakeFakeDataWeights.py
-│   ├── ValidateFakeData.py
-│   ├── GetOmnifoldWeights.py
-│   ├── config_omnifold.json
-│   ├── config_omnifold_fakedata.json
-│   ├── runOmnifold.sh
-│   └── runOmnifold_fakedata.sh
+│   └── ...
 │
-├── sbnd/                       # SBND analysis files
-│   ├── FormatData_SBND.py
-│   ├── MakeFakeDataWeights_SBND.py
-│   ├── ValidateFakeData_SBND.py
-│   ├── RunSystematicUniverses.py
-│   ├── BuildCovarianceMatrix.py
-│   ├── ExtractXsec.py
-│   ├── PlotResults.py
-│   ├── config_omnifold_sbnd_closure.json
-│   ├── config_omnifold_sbnd_fakedata_tilt.json
-│   ├── runOmnifold_sbnd_closure.sh
-│   ├── runOmnifold_sbnd_fakedata_tilt.sh
-│   └── exported_weights/       # Universe weights exported from notebook
-│
-└── .gitignore
+└── sbnd/
+    ├── FormatData_SBND.py      # (unchanged) Format cafpyana output for OmniFold
+    ├── RunStudies.py           # Closure check, fake data, syst universes, ML unc
+    ├── BuildResults.py         # Covariance matrices + cross-section extraction
+    ├── MakePlots.py            # All plots: validation, paper-style, diagnostics
+    ├── config_omnifold_sbnd_closure.json
+    ├── config_omnifold_sbnd_fakedata_tilt.json
+    ├── runOmnifold_sbnd_closure.sh
+    ├── runOmnifold_sbnd_fakedata_tilt.sh
+    └── exported_weights/       # Universe weights exported from notebook
 ```
+
+## Output directories
+
+| Directory | Contents |
+|---|---|
+| `../FormattedData_SBND/` | Formatted numpy arrays (FormatData_SBND.py) |
+| `plots_sbnd_closure/` | Closure test weight plots (RunStudies.py check-closure) |
+| `plots_sbnd_fakedata_{tag}/` | Fake-data validation plots (MakePlots.py validation) |
+| `sbnd/covariance/` | Covariance .npz files (BuildResults.py covariance) |
+| `sbnd/plots_systematics/` | Covariance diagnostic plots (BuildResults.py covariance) |
+| `sbnd/plots_xsec/` | All paper-style and diagnostic plots (MakePlots.py paper) |
 
 ## Setup
 
-Works on both FNAL EAF (AlmaLinux 9) and GPVM (SL7).
-
 ```bash
-# First time:
-source setup.sh --install
-
-# Every subsequent session:
-source setup.sh
+source setup.sh --install   # first time only
+source setup.sh             # every subsequent session
 ```
 
-All commands below assume you have run `source setup.sh` and are in the repo root.
+All commands below assume `source setup.sh` has been run and you are in the repo root.
 
 ---
 
-## Quick reference: full SBND pipeline
+## Full SBND pipeline
 
-```bash
-# 1. Format data
-python3 sbnd/FormatData_SBND.py
-
-# 2. Closure test
-nohup bash sbnd/runOmnifold_sbnd_closure.sh > omnifold_sbnd_closure.log 2>&1 &
-python3 sbnd/MakeFakeDataWeights_SBND.py --check-closure
-
-# 3. Fake data test
-python3 sbnd/MakeFakeDataWeights_SBND.py --mode tilt --alpha 0.5
-nohup bash sbnd/runOmnifold_sbnd_fakedata_tilt.sh > omnifold_sbnd_fakedata_tilt.log 2>&1 &
-python3 sbnd/ValidateFakeData_SBND.py --tag tilt_alpha0.5
-
-# 4. Systematic universes (export weights from notebook first)
-nohup python3 sbnd/RunSystematicUniverses.py --source bnb --start 0 --end 100 > syst_bnb.log 2>&1 &
-nohup python3 sbnd/RunSystematicUniverses.py --source genie --start 0 --end 100 > syst_genie.log 2>&1 &
-nohup python3 sbnd/RunSystematicUniverses.py --source mcstat \
-    --universe-file sbnd/exported_weights/mcstat_universe_weights.npy \
-    --start 0 --end 100 > syst_mcstat.log 2>&1 &
-
-# 5. Covariance matrices
-python3 sbnd/BuildCovarianceMatrix.py --source all --var true_ke
-python3 sbnd/BuildCovarianceMatrix.py --source all --var true_costheta
-
-# 6. Cross-section extraction
-python3 sbnd/ExtractXsec.py --var both
-
-# 7. Paper-style presentation plots
-python3 sbnd/PlotResults.py --var both
-```
-
----
-
-## T2K validation
-
-Uses the public T2K ND280 νμCC0π training sample (~407k events):
-https://zenodo.org/doi/10.5281/zenodo.15183090
-
-### 1. Format data
-
-```bash
-python3 t2k/FormatData.py
-```
-
-### 2. Closure test
-
-```bash
-nohup bash t2k/runOmnifold.sh > omnifold_t2k_closure.log 2>&1 &
-```
-
-**Result:** Loss flat ~0.0487. Push/pull weights ≈ 1.0.
-
-### 3. Known-reweighting test
-
-```bash
-python3 t2k/MakeFakeDataWeights.py
-nohup bash t2k/runOmnifold_fakedata.sh > omnifold_t2k_fakedata.log 2>&1 &
-python3 t2k/ValidateFakeData.py
-```
-
-**Result:** Push mean=0.9755 vs injected 0.9677 (0.8% agreement). Confirmed by Roger Huang.
-
----
-
-## SBND analysis
-
-### Variables and dataset
-
-- **Reco features:** `reco_ke`, `reco_costheta` (electron kinematics from SPINE/DLP)
-- **Truth features:** `true_ke`, `true_costheta`
-- **Selection:** `sel_vertex_distance` (final cut stage)
-- **Events:** 6,399 selected signal events
-
-### Step 1: Format SBND data
-
-Requires `selected_nuecc_qual.pkl` from the νeCC analysis pipeline.
+### Step 1 — Format data
 
 ```bash
 python3 sbnd/FormatData_SBND.py
 ```
 
-### Step 2: Closure test
+Reads `selected_nuecc_qual.pkl` from the νeCC analysis pipeline. Output: `../FormattedData_SBND/`.
+
+---
+
+### Step 2 — Closure test
 
 ```bash
 nohup bash sbnd/runOmnifold_sbnd_closure.sh > omnifold_sbnd_closure.log 2>&1 &
-python3 sbnd/MakeFakeDataWeights_SBND.py --check-closure
+python3 sbnd/RunStudies.py check-closure
 ```
 
-**Result:** Push mean=1.0091, std=0.0070. PASSED.
+Output plots: `plots_sbnd_closure/closure_weight_distributions.png`, `closure_convergence.png`.
+**Result:** Push mean≈1.0, std<0.1 → PASSED.
 
-### Step 3: Fake data test (synthetic tilt)
+---
 
+### Step 3 — Fake data test
+
+**Default tilt (alpha=0.5):**
 ```bash
-python3 sbnd/MakeFakeDataWeights_SBND.py --mode tilt --alpha 0.5
+python3 sbnd/RunStudies.py make-fakedata --mode tilt --alpha 0.5
 nohup bash sbnd/runOmnifold_sbnd_fakedata_tilt.sh > omnifold_sbnd_fakedata_tilt.log 2>&1 &
-python3 sbnd/ValidateFakeData_SBND.py --tag tilt_alpha0.5
+python3 sbnd/MakePlots.py validation --tag tilt_alpha0.5
 ```
 
-**Result:** Push mean=1.0036 vs injected 1.0000 (0.4%). Chi2/ndf: 655→2.2 (true_ke), 334→0.25 (true_cosθ). Monotonic convergence, no overfitting.
+**To change the tilt strength:** edit `--alpha`. Larger alpha = stronger distortion, harder for OmniFold to recover.
+- `--alpha 0.3` — mild tilt (~30% variation across p range)
+- `--alpha 0.5` — default, moderate
+- `--alpha 1.0` — strong; tests OmniFold limits
 
-### Step 4: Systematic uncertainty propagation
+After changing alpha you need to: (1) re-run `make-fakedata`, (2) re-run the OmniFold shell script, (3) re-run `MakePlots.py validation`.
+
+**To use a BNB universe as fake data instead:**
+```bash
+python3 sbnd/RunStudies.py make-fakedata --mode universe \
+    --universe-file sbnd/exported_weights/bnb_universe_weights.npy \
+    --universe-idx 0
+```
+
+Output plots: `plots_sbnd_fakedata_{tag}/recovery_{var}.png`, `unfolded_distributions.png`, `chi2_vs_iterations.png`.
+
+---
+
+### Step 4 — Systematic uncertainty propagation
 
 #### 4a. Export universe weights from notebook
 
-Add export cells to `nuecc_systematics.ipynb` (after cell 3) to save aligned BNB, GENIE, and MCstat universe weights to `sbnd/exported_weights/`.
+Export BNB, GENIE, and MCstat universe weights from `nuecc_systematics.ipynb` to `sbnd/exported_weights/`.
 
-#### 4b. Run 300 universes
+#### 4b. Run systematic universes
 
 ```bash
-source setup.sh
-nohup python3 sbnd/RunSystematicUniverses.py --source bnb --start 0 --end 100 > syst_bnb.log 2>&1 &
-nohup python3 sbnd/RunSystematicUniverses.py --source genie --start 0 --end 100 > syst_genie.log 2>&1 &
-nohup python3 sbnd/RunSystematicUniverses.py --source mcstat \
+nohup python3 sbnd/RunStudies.py run-syst --source bnb   --start 0 --end 100 > syst_bnb.log   2>&1 &
+nohup python3 sbnd/RunStudies.py run-syst --source genie --start 0 --end 100 > syst_genie.log 2>&1 &
+nohup python3 sbnd/RunStudies.py run-syst --source mcstat \
     --universe-file sbnd/exported_weights/mcstat_universe_weights.npy \
     --start 0 --end 100 > syst_mcstat.log 2>&1 &
 ```
 
 #### 4c. Build covariance matrices
 
-```bash
-python3 sbnd/BuildCovarianceMatrix.py --source bnb --var true_ke
-python3 sbnd/BuildCovarianceMatrix.py --source genie --var true_ke
-python3 sbnd/BuildCovarianceMatrix.py --source all --var true_ke
-python3 sbnd/BuildCovarianceMatrix.py --source bnb --var true_costheta
-python3 sbnd/BuildCovarianceMatrix.py --source genie --var true_costheta
-python3 sbnd/BuildCovarianceMatrix.py --source all --var true_costheta
-```
-
-**Result (combined, true_ke):** 1.7–4.0% fractional uncertainty. Chi2/ndf ≈ 0.007, flat across iterations.
-
-### Step 5: Cross-section extraction
-
-Export per-bin efficiency from the notebook first, then:
+`--source all` saves both the combined `covariance_all_*.npz` and per-source breakdowns
+(`covariance_bnb_*.npz`, etc.) to `sbnd/covariance/` — both are needed for the uncertainty budget plot.
 
 ```bash
-python3 sbnd/ExtractXsec.py --var both
+python3 sbnd/BuildResults.py covariance --source all --var true_p
+python3 sbnd/BuildResults.py covariance --source all --var true_costheta
 ```
 
-Produces dσ/dKE and dσ/dcosθ with systematic bands. Currently shape-only; set `INTEGRATED_FLUX_PER_POT` and `N_TARGETS` in the script for absolute normalization.
-
-### Step 6: Paper-style presentation plots
-
-```bash
-python3 sbnd/PlotResults.py --var both
-```
-
-Produces plots matching [Huang et al. (2025)](https://arxiv.org/abs/2504.06857):
-- `xsec_vs_truth_{var}.png` — Unfolded xsec vs Data Truth (Fig 9 style)
-- `ratio_to_truth_{var}.png` — Ratio to Data Truth (Fig 10 style)
-- `chi2_convergence_{var}.png` — Chi2/DoF vs iterations (Fig 4 style)
-- `uncertainty_budget_{var}.png` — Fractional uncertainty breakdown (Fig 8 style)
-- `correlation_{var}.png` — Correlation matrix (Appendix A style)
+Output `.npz` files go to `sbnd/covariance/`. Diagnostic plots go to `sbnd/plots_systematics/`.
 
 ---
+
+### Step 5 — Cross-section extraction
+
+```bash
+python3 sbnd/BuildResults.py xsec --var both
+```
+
+Output plots: `sbnd/plots_xsec/xsec_{var}.png`, `efficiency_{var}.png`, `ratio_to_truth_{var}.png`.
+
+---
+
+### Step 6 — All paper and diagnostic plots
+
+```bash
+python3 sbnd/MakePlots.py paper --var both --tag tilt_alpha0.5
+```
+
+Or validation + paper together:
+```bash
+python3 sbnd/MakePlots.py all --var both --tag tilt_alpha0.5
+```
+
+Output: `sbnd/plots_xsec/` — see plot reference table below.
+
+---
+
+### Step 7 — ML/NN-initialization uncertainty (optional)
+
+```bash
+nohup python3 sbnd/RunStudies.py run-ml-unc \
+    --n-replicas 10 --tag tilt_alpha0.5 > ml_unc.log 2>&1 &
+
+# After replicas finish:
+python3 sbnd/BuildResults.py covariance --source ml --var true_p
+python3 sbnd/BuildResults.py covariance --source ml --var true_costheta
+python3 sbnd/MakePlots.py paper --var both   # reruns to include ML band
+```
+
+---
+
+## How to increase statistics / events
+
+The event count (currently ~6,400) is set by the selection in `FormatData_SBND.py`:
+```python
+FINAL_STAGE = 'sel_vertex_distance'   # loosen this to include more events
+```
+Loosening the cut (e.g. using an earlier cut stage) increases N but also lowers purity. OmniFold handles lower-purity samples via the efficiency correction — but you need to re-export efficiency from the notebook after changing the cut.
+
+**Do we need more iterations with more events?** Not necessarily — more events makes each iteration more stable (less NN variance), so you may need *fewer*. The chi2/ndf convergence plot tells you: if it plateaus well before the final iteration, you have enough.
+
+---
+
+## How to change the tilt
+
+The tilt is a per-event reweighting function applied to `true_p`:
+```
+weight_i = 1 + alpha * (log(p_i) - mean(log(p))) / std(log(p))
+```
+- Controlled by `--alpha` in `RunStudies.py make-fakedata`
+- `alpha=0` → no distortion (closure test)
+- `alpha=0.5` → ~50% variation peak-to-peak across the p range
+- `alpha=1.0` → strong; some bins get weights near 0 or 2
+
+To try a completely different distortion shape, edit `do_make_fakedata()` in `RunStudies.py`.
+
+---
+
+## Plot reference
+
+| Output directory | Script | Plots |
+|---|---|---|
+| `plots_sbnd_closure/` | `RunStudies.py check-closure` | `closure_weight_distributions.png`, `closure_convergence.png` |
+| `plots_sbnd_fakedata_{tag}/` | `MakePlots.py validation` | `recovery_{var}.png`, `unfolded_distributions.png`, `chi2_vs_iterations.png` |
+| `sbnd/covariance/` | `BuildResults.py covariance` | `covariance_{source}_{var}.npz` (data files, not plots) |
+| `sbnd/plots_systematics/` | `BuildResults.py covariance` | `cov_matrix_{source}_{var}.png`, `unfolded_with_unc_{source}_{var}.png`, `universe_spread_{source}_{var}.png`, `chi2_vs_iter_{source}_{var}.png` |
+| `sbnd/plots_xsec/` | `BuildResults.py xsec` | `xsec_{var}.png`, `efficiency_{var}.png`, `ratio_to_truth_{var}.png` |
+| `sbnd/plots_xsec/` | `MakePlots.py paper` | `xsec_vs_truth_{var}.png`, `ratio_to_truth_{var}.png`, `chi2_convergence_{var}.png`, `chi2_convergence_combined.png`, `uncertainty_budget_{var}.png`, `correlation_{var}.png`, `reweighting_snapshots_{var}.png`, `weights_vs_observable_{var}.png`, `weight_distributions.png`, `weight_map_2d.png`, `weight_change_distribution.png`, `xsec_2d_slices.png`, `correlation_2d_p_costheta.png` |
 
 ## Configuration reference
 
 | Parameter | T2K | SBND | SBND syst |
-|-----------|-----|------|-----------|
+|---|---|---|---|
 | `NITER` | 15 | 10 | 5 |
 | `NTRIAL` | 3 | 3 | 1 |
 | `LR` | 1e-4 | 1e-3 | 1e-3 |
 | `BATCH_SIZE` | 4096 | 512 | 512 |
 | `EPOCHS` | 50 | 100 | 50 |
 | `NPATIENCE` | 7 | 10 | 7 |
-
-## Core files
-
-- **`t2k.py`**: Training driver. Use `--no_eff` to exclude unmatched truth events from Step 2.
-- **`omnifold.py`**: OmniFold implementation. Based on [AlephOmniFold](https://github.com/ViniciusMikuni/AlephOmniFold).
-- **`utils.py`**: Data loader and plotting utilities.
 
 ## Credits
 

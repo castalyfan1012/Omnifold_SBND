@@ -33,9 +33,16 @@ p_cov.add_argument('--var', choices=['true_p', 'true_costheta', 'both'],
 p_cov.add_argument('--data-dir', default='../FormattedData_SBND/')
 p_cov.add_argument('--weights-base', default='sbnd')
 p_cov.add_argument('--ml-weights-dir', default='sbnd/weights_ml_unc/')
-p_cov.add_argument('--plot-dir', default='sbnd/plots_systematics/')
+p_cov.add_argument('--plot-dir', default='sbnd/plots_syst/')
 p_cov.add_argument('--cov-dir', default='sbnd/covariance/',
                    help='Directory to save .npz covariance files (separate from plots)')
+p_cov.add_argument('--freeze-ml', action='store_true',
+                   help='When --source all, skip recomputing ML covariance if the .npz already '
+                        'exists. Use this after a completed ML replica run to avoid re-training.')
+p_cov.add_argument('--ml-label', default=None,
+                   help='Optional tag for the ML covariance file, e.g. "50rep_15iter". '
+                        'Saves as covariance_ml_{label}_{var}.npz in addition to the standard '
+                        'covariance_ml_{var}.npz so past runs are never overwritten.')
 
 # ── xsec ──────────────────────────────────────────────────────────────────────
 p_xs = sub.add_parser('xsec')
@@ -168,11 +175,22 @@ def build_covariance_single_var(var_name):
              cov=cov, frac_cov=frac_cov, bins=bins,
              mean_hist=mean_hist, nom_hist=nom_hist, all_hists=all_hists)
 
-    # ── BUG FIX: save per-source when --source all ────────────────────────────
+    # ── Save per-source when --source all ─────────────────────────────────────
     if flags.source == 'all':
+        freeze_ml = getattr(flags, 'freeze_ml', False)
+        ml_label  = getattr(flags, 'ml_label', None)
+
         for src, src_arr in hists_by_source.items():
             if len(src_arr) < 2:
                 continue
+
+            # --freeze-ml: skip ML recompute if file already exists
+            standard_path = f'{cov_dir}/covariance_{src}_{var_name}.npz'
+            if src == 'ml' and freeze_ml and os.path.exists(standard_path):
+                print(f"  --freeze-ml: skipping ML recompute, "
+                      f"using existing {standard_path}")
+                continue
+
             sm = src_arr.mean(axis=0)
             sd = src_arr - sm[np.newaxis, :]
             sc = (sd.T @ sd) / len(src_arr)
@@ -182,11 +200,22 @@ def build_covariance_single_var(var_name):
                     d = sm[i] * sm[j]
                     if d > 0:
                         sf[i, j] = sc[i, j] / d
-            np.savez(f'{cov_dir}/covariance_{src}_{var_name}.npz',
-                     cov=sc, frac_cov=sf, bins=bins,
-                     mean_hist=sm, nom_hist=nom_hist, all_hists=src_arr)
+
+            payload = dict(cov=sc, frac_cov=sf, bins=bins,
+                           mean_hist=sm, nom_hist=nom_hist, all_hists=src_arr,
+                           n_universes=np.array(len(src_arr)))
+
+            # Always write the standard name (so downstream scripts find it)
+            np.savez(standard_path, **payload)
             print(f"  Per-source saved: covariance_{src}_{var_name}.npz "
                   f"({len(src_arr)} universes)")
+
+            # For ML: also write a labelled snapshot so it is never overwritten
+            if src == 'ml':
+                label = ml_label or f"{len(src_arr)}rep"
+                snapshot_path = f'{cov_dir}/covariance_ml_{label}_{var_name}.npz'
+                np.savez(snapshot_path, **payload)
+                print(f"  ML snapshot saved: covariance_ml_{label}_{var_name}.npz")
 
     # ── Print table ───────────────────────────────────────────────────────────
     print(f"\n{'Bin center':>10s} {'Nominal':>10s} {'Mean':>10s} "
@@ -313,7 +342,7 @@ def build_covariance_single_var(var_name):
     print(f"  Measures: (universe_mean - nominal)^T C^-1 (universe_mean - nominal)")
     print(f"  Interpretation: how much the systematic universes SHIFT the result vs nominal.")
     print(f"  Small (~0.05) and flat = good: systematics are stable across OmniFold iterations.")
-    print(f"  This is NOT the fake-data recovery chi2 (see PlotAll.py validation for that).")
+    print(f"  This is NOT the fake-data recovery chi2 (see MakePlots.py validation for that).")
     print(f"  {'Iter':>5s} {'chi2':>10s}  note")
     for pi, c2 in zip(paper_iters, paper_chi2):
         s = f"{c2:10.2f}" if not np.isnan(c2) else "       N/A"
@@ -326,9 +355,9 @@ def build_covariance_single_var(var_name):
         vi, vc = zip(*valid)
         ax4.plot(vi, vc, 'ro-', linewidth=2, markersize=6)
     ax4.set_xlabel('OmniFold Iteration'); ax4.set_ylabel(r'$\chi^2$')
-    ax4.set_title(f'Convergence: {var_name} ({flags.source})')
+    ax4.set_title(f'Systematic stability: {var_name} ({flags.source})')
     plt.tight_layout()
-    plt.savefig(f'{flags.plot_dir}/chi2_vs_iter_{flags.source}_{var_name}.png', dpi=150)
+    plt.savefig(f'{flags.plot_dir}/syst_chi2_vs_iter_{flags.source}_{var_name}.png', dpi=150)
     plt.close()
 
     print(f"  Plots saved to {flags.plot_dir}/")

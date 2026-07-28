@@ -1,6 +1,6 @@
 # Omnifold_SBND
 
-Machine-learning-based unbinned unfolding using the [OmniFold](https://arxiv.org/abs/1911.09107) method for the SBND νeCC inclusive cross-section measurement, with initial validation on a T2K public dataset. Based on the methodology described in [Huang et al. (2025)](https://arxiv.org/abs/2504.06857).
+ML-based unbinned unfolding using [OmniFold](https://arxiv.org/abs/1911.09107) for the SBND nueCC inclusive cross-section measurement. Based on [Huang et al. (2025)](https://arxiv.org/abs/2504.06857).
 
 ## Repository structure
 
@@ -10,32 +10,43 @@ Omnifold_SBND/
 ├── omnifold.py                 # Core OmniFold engine
 ├── utils.py                    # Data loading and plotting utilities
 ├── t2k.py                      # Training driver script
-│
 ├── t2k/                        # T2K validation files
-│   └── ...
-│
 └── sbnd/
-    ├── FormatData_SBND.py      # (unchanged) Format cafpyana output for OmniFold
+    ├── FormatData_SBND.py      # Format cafpyana output for OmniFold
     ├── RunStudies.py           # Closure check, fake data, syst universes, ML unc
     ├── BuildResults.py         # Covariance matrices + cross-section extraction
     ├── MakePlots.py            # All plots: validation, paper-style, diagnostics
-    ├── config_omnifold_sbnd_closure.json
-    ├── config_omnifold_sbnd_fakedata_tilt.json
+    ├── runOmnifold_sbnd_fakedata.sh   # Parameterised training script
     ├── runOmnifold_sbnd_closure.sh
-    ├── runOmnifold_sbnd_fakedata_tilt.sh
+    ├── config_omnifold_sbnd_*.json
     └── exported_weights/       # Universe weights exported from notebook
 ```
 
 ## Output directories
 
-| Directory | Contents |
-|---|---|
-| `../FormattedData_SBND/` | Formatted numpy arrays (FormatData_SBND.py) |
-| `plots_sbnd_closure/` | Closure test weight plots (RunStudies.py check-closure) |
-| `plots_sbnd_fakedata_{tag}/` | Fake-data validation plots (MakePlots.py validation) |
-| `sbnd/covariance/` | Covariance .npz files (BuildResults.py covariance) |
-| `sbnd/plots_systematics/` | Covariance diagnostic plots (BuildResults.py covariance) |
-| `sbnd/plots_xsec/` | All paper-style and diagnostic plots (MakePlots.py paper) |
+| Directory | Contents | Overwrite-safe? |
+|---|---|---|
+| `../FormattedData_SBND/` | Formatted numpy arrays | N/A |
+| `weights_sbnd_fakedata_{tag}/` | OmniFold weights per tag | Yes — separate per tag |
+| `sbnd/weights_ml_unc/replica_*/` | ML replica weights | Yes — use `--freeze-ml` |
+| `sbnd/plots_validation/` | Closure + fake-data plots | Yes — tag in filename |
+| `sbnd/plots_syst/` | Covariance diagnostic plots | Tag-independent |
+| `sbnd/plots_xsec/` | Paper-style plots | Tag in filename where relevant |
+| `sbnd/covariance/` | Covariance .npz files | Use `--ml-label` for snapshots |
+
+## What produces what (important — read this)
+
+| Stage | Weights used | Plots produced | What it tests |
+|---|---|---|---|
+| **Closure** (`RunStudies check-closure`) | `weights_sbnd_closure/` | `sbnd/plots_validation/closure_*.png` | OmniFold returns w=1 when data=MC |
+| **Fake data** (`MakePlots validation`) | `weights_sbnd_fakedata_{tag}/` | `sbnd/plots_validation/fakedata_{tag}_*.png` | Can OmniFold recover a known distortion? |
+| **Syst universes** (`BuildResults covariance`) | `sbnd/weights_bnb/` etc. | `sbnd/plots_syst/` + `sbnd/covariance/*.npz` | Systematic uncertainty propagation |
+| **ML replicas** (`BuildResults covariance --source ml`) | `sbnd/weights_ml_unc/replica_*/` | Feeds into `covariance_ml_*.npz` | NN initialization sensitivity |
+| **Paper plots** (`MakePlots paper`) | fake-data weights + covariance | `sbnd/plots_xsec/` | Combined picture: xsec + systematics |
+
+The **ML replicas** are NOT more iterations. Each of the 50 replicas is an independent OmniFold run (10 iterations each) with a different random seed. The *spread* across 50 final results = ML uncertainty. This goes into the uncertainty budget alongside BNB/GENIE/MCstat.
+
+---
 
 ## Setup
 
@@ -44,69 +55,53 @@ source setup.sh --install   # first time only
 source setup.sh             # every subsequent session
 ```
 
-All commands below assume `source setup.sh` has been run and you are in the repo root.
-
 ---
 
 ## Full SBND pipeline
 
 ### Step 1 — Format data
-
 ```bash
 python3 sbnd/FormatData_SBND.py
 ```
 
-Reads `selected_nuecc_qual.pkl` from the νeCC analysis pipeline. Output: `../FormattedData_SBND/`.
-
----
-
 ### Step 2 — Closure test
-
 ```bash
 nohup bash sbnd/runOmnifold_sbnd_closure.sh > omnifold_sbnd_closure.log 2>&1 &
 python3 sbnd/RunStudies.py check-closure
 ```
 
-Output plots: `plots_sbnd_closure/closure_weight_distributions.png`, `closure_convergence.png`.
-**Result:** Push mean≈1.0, std<0.1 → PASSED.
-
----
-
 ### Step 3 — Fake data test
 
-**Default tilt (alpha=0.5):**
+The new shell script accepts a tag and optional NITER:
 ```bash
+# Generate fake data weights
 python3 sbnd/RunStudies.py make-fakedata --mode tilt --alpha 0.5
-nohup bash sbnd/runOmnifold_sbnd_fakedata_tilt.sh > omnifold_sbnd_fakedata_tilt.log 2>&1 &
+
+# Train OmniFold (default: NITER=10)
+nohup bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.5 > fakedata_0.5.log 2>&1 &
+
+# Or with more iterations:
+nohup bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.5 20 > fakedata_0.5_n20.log 2>&1 &
+
+# Make validation plots
 python3 sbnd/MakePlots.py validation --tag tilt_alpha0.5
 ```
 
-**To change the tilt strength:** edit `--alpha`. Larger alpha = stronger distortion, harder for OmniFold to recover.
-- `--alpha 0.3` — mild tilt (~30% variation across p range)
-- `--alpha 0.5` — default, moderate
-- `--alpha 1.0` — strong; tests OmniFold limits
-
-After changing alpha you need to: (1) re-run `make-fakedata`, (2) re-run the OmniFold shell script, (3) re-run `MakePlots.py validation`.
-
-**To use a BNB universe as fake data instead:**
+**To try a different tilt:**
 ```bash
-python3 sbnd/RunStudies.py make-fakedata --mode universe \
-    --universe-file sbnd/exported_weights/bnb_universe_weights.npy \
-    --universe-idx 0
+python3 sbnd/RunStudies.py make-fakedata --mode tilt --alpha 0.3
+nohup bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.3 > fakedata_0.3.log 2>&1 &
+python3 sbnd/MakePlots.py validation --tag tilt_alpha0.3
 ```
 
-Output plots: `plots_sbnd_fakedata_{tag}/recovery_{var}.png`, `unfolded_distributions.png`, `chi2_vs_iterations.png`.
-
----
+All plots include the tag in the filename — `tilt_alpha0.5` and `tilt_alpha0.3` never overwrite each other.
 
 ### Step 4 — Systematic uncertainty propagation
 
 #### 4a. Export universe weights from notebook
-
-Export BNB, GENIE, and MCstat universe weights from `nuecc_systematics.ipynb` to `sbnd/exported_weights/`.
+Export BNB, GENIE, MCstat weights from `nuecc_systematics.ipynb` to `sbnd/exported_weights/`.
 
 #### 4b. Run systematic universes
-
 ```bash
 nohup python3 sbnd/RunStudies.py run-syst --source bnb   --start 0 --end 100 > syst_bnb.log   2>&1 &
 nohup python3 sbnd/RunStudies.py run-syst --source genie --start 0 --end 100 > syst_genie.log 2>&1 &
@@ -116,107 +111,87 @@ nohup python3 sbnd/RunStudies.py run-syst --source mcstat \
 ```
 
 #### 4c. Build covariance matrices
-
-`--source all` saves both the combined `covariance_all_*.npz` and per-source breakdowns
-(`covariance_bnb_*.npz`, etc.) to `sbnd/covariance/` — both are needed for the uncertainty budget plot.
-
 ```bash
-python3 sbnd/BuildResults.py covariance --source all --var true_p
-python3 sbnd/BuildResults.py covariance --source all --var true_costheta
+python3 sbnd/BuildResults.py covariance --source all --var both
 ```
 
-Output `.npz` files go to `sbnd/covariance/`. Diagnostic plots go to `sbnd/plots_systematics/`.
-
----
-
 ### Step 5 — Cross-section extraction
-
 ```bash
 python3 sbnd/BuildResults.py xsec --var both
 ```
 
-Output plots: `sbnd/plots_xsec/xsec_{var}.png`, `efficiency_{var}.png`, `ratio_to_truth_{var}.png`.
-
----
-
-### Step 6 — All paper and diagnostic plots
-
+### Step 6 — Paper plots
 ```bash
 python3 sbnd/MakePlots.py paper --var both --tag tilt_alpha0.5
-```
-
-Or validation + paper together:
-```bash
+# Or all at once:
 python3 sbnd/MakePlots.py all --var both --tag tilt_alpha0.5
 ```
 
-Output: `sbnd/plots_xsec/` — see plot reference table below.
-
----
-
-### Step 7 — ML/NN-initialization uncertainty (optional)
+### Step 7 — ML/NN-initialization uncertainty
 
 ```bash
+# Run 50 replicas (already done)
 nohup python3 sbnd/RunStudies.py run-ml-unc \
-    --n-replicas 10 --tag tilt_alpha0.5 > ml_unc.log 2>&1 &
+    --n-replicas 50 --tag tilt_alpha0.5 --niter 10 --epochs 100 > ml_unc.log 2>&1 &
 
-# After replicas finish:
-python3 sbnd/BuildResults.py covariance --source ml --var true_p
-python3 sbnd/BuildResults.py covariance --source ml --var true_costheta
-python3 sbnd/MakePlots.py paper --var both   # reruns to include ML band
+# Build covariance with ML snapshot label (so it's never overwritten)
+python3 sbnd/BuildResults.py covariance --source all --var both --ml-label 50rep_10iter
+
+# Future covariance rebuilds won't recompute ML:
+python3 sbnd/BuildResults.py covariance --source all --var both --freeze-ml
+
+# Replot paper figures
+python3 sbnd/MakePlots.py paper --var both --tag tilt_alpha0.5
 ```
 
 ---
 
-## How to increase statistics / events
+## Key plot differences
 
-The event count (currently ~6,400) is set by the selection in `FormatData_SBND.py`:
-```python
-FINAL_STAGE = 'sel_vertex_distance'   # loosen this to include more events
-```
-Loosening the cut (e.g. using an earlier cut stage) increases N but also lowers purity. OmniFold handles lower-purity samples via the efficiency correction — but you need to re-export efficiency from the notebook after changing the cut.
+| Plot | Location | Error bars show | Depends on tag? |
+|---|---|---|---|
+| `fakedata_{tag}_unfolded_distributions.png` | `plots_validation/` | sqrt(N) statistical only | Yes |
+| `xsec_vs_truth_{tag}_{var}.png` | `plots_xsec/` | Systematic unc from covariance (BNB+GENIE+MCstat+ML) | Yes |
+| `uncertainty_budget_{var}.png` | `plots_xsec/` | Per-source fractional uncertainty | No (from covariance only) |
+| `correlation_{var}.png` | `plots_xsec/` | Bin-to-bin correlation | No |
 
-**Do we need more iterations with more events?** Not necessarily — more events makes each iteration more stable (less NN variance), so you may need *fewer*. The chi2/ndf convergence plot tells you: if it plateaus well before the final iteration, you have enough.
+The xsec error bars are larger than the fakedata bars because they include all systematic sources.
 
 ---
 
-## How to change the tilt
+## Tilt reference
 
-The tilt is a per-event reweighting function applied to `true_p`:
 ```
 weight_i = 1 + alpha * (log(p_i) - mean(log(p))) / std(log(p))
 ```
-- Controlled by `--alpha` in `RunStudies.py make-fakedata`
-- `alpha=0` → no distortion (closure test)
-- `alpha=0.5` → ~50% variation peak-to-peak across the p range
-- `alpha=1.0` → strong; some bins get weights near 0 or 2
 
-To try a completely different distortion shape, edit `do_make_fakedata()` in `RunStudies.py`.
+| alpha | Effect |
+|---|---|
+| 0.0 | No distortion (closure) |
+| 0.3 | Mild (~30% peak-to-peak) |
+| 0.5 | Default moderate |
+| 1.0 | Strong; bottom bins approach zero |
 
 ---
 
 ## Plot reference
 
-| Output directory | Script | Plots |
+| Directory | Script | Key plots |
 |---|---|---|
-| `plots_sbnd_closure/` | `RunStudies.py check-closure` | `closure_weight_distributions.png`, `closure_convergence.png` |
-| `plots_sbnd_fakedata_{tag}/` | `MakePlots.py validation` | `recovery_{var}.png`, `unfolded_distributions.png`, `chi2_vs_iterations.png` |
-| `sbnd/covariance/` | `BuildResults.py covariance` | `covariance_{source}_{var}.npz` (data files, not plots) |
-| `sbnd/plots_systematics/` | `BuildResults.py covariance` | `cov_matrix_{source}_{var}.png`, `unfolded_with_unc_{source}_{var}.png`, `universe_spread_{source}_{var}.png`, `chi2_vs_iter_{source}_{var}.png` |
-| `sbnd/plots_xsec/` | `BuildResults.py xsec` | `xsec_{var}.png`, `efficiency_{var}.png`, `ratio_to_truth_{var}.png` |
-| `sbnd/plots_xsec/` | `MakePlots.py paper` | `xsec_vs_truth_{var}.png`, `ratio_to_truth_{var}.png`, `chi2_convergence_{var}.png`, `chi2_convergence_combined.png`, `uncertainty_budget_{var}.png`, `correlation_{var}.png`, `reweighting_snapshots_{var}.png`, `weights_vs_observable_{var}.png`, `weight_distributions.png`, `weight_map_2d.png`, `weight_change_distribution.png`, `xsec_2d_slices.png`, `correlation_2d_p_costheta.png` |
+| `sbnd/plots_validation/` | `RunStudies.py check-closure` | `closure_weight_distributions.png`, `closure_convergence.png` |
+| `sbnd/plots_validation/` | `MakePlots.py validation` | `fakedata_{tag}_recovery_{var}.png`, `fakedata_{tag}_unfolded_distributions.png`, `fakedata_{tag}_chi2_convergence.png`, `fakedata_{tag}_chi2_bin_diagnostic.png` |
+| `sbnd/plots_syst/` | `BuildResults.py covariance` | `cov_matrix_{src}_{var}.png`, `unfolded_with_unc_{src}_{var}.png`, `universe_spread_{src}_{var}.png`, `syst_chi2_vs_iter_{src}_{var}.png` |
+| `sbnd/plots_xsec/` | `BuildResults.py xsec` | `xsec_{var}.png`, `efficiency_{var}.png` |
+| `sbnd/plots_xsec/` | `MakePlots.py paper` | `xsec_vs_truth_{tag}_{var}.png`, `ratio_to_truth_{tag}_{var}.png`, `chi2_convergence_{tag}.png`, `uncertainty_budget_{var}.png`, `correlation_{var}.png`, `reweighting_snapshots_{tag}_{var}.png`, `weight_distributions_{tag}.png`, `weight_map_2d_{tag}.png`, `xsec_2d_slices_{tag}.png`, `correlation_2d_p_costheta.png` |
 
 ## Configuration reference
 
-| Parameter | T2K | SBND | SBND syst |
+| Parameter | SBND main | SBND syst | SBND ML unc |
 |---|---|---|---|
-| `NITER` | 15 | 10 | 5 |
-| `NTRIAL` | 3 | 3 | 1 |
-| `LR` | 1e-4 | 1e-3 | 1e-3 |
-| `BATCH_SIZE` | 4096 | 512 | 512 |
-| `EPOCHS` | 50 | 100 | 50 |
-| `NPATIENCE` | 7 | 10 | 7 |
+| `NITER` | 10 (try 20 for true_p) | 5 | 10-15 |
+| `NTRIAL` | 3 | 1 | 1 |
+| `EPOCHS` | 100 | 50 | 100-150 |
 
 ## Credits
 
-Based on OmniFold code from [rhuang1/OmnifoldT2K](https://github.com/rhuang1/OmnifoldT2K). SBND adaptation by Castaly Fan with guidance from Roger Huang and Afroditi Papadopoulou.
+Based on OmniFold from [rhuang1/OmnifoldT2K](https://github.com/rhuang1/OmnifoldT2K). SBND adaptation by Castaly Fan with guidance from Roger Huang and Afroditi Papadopoulou.

@@ -29,6 +29,7 @@ sub = parser.add_subparsers(dest='action', required=True)
 # ── check-closure ─────────────────────────────────────────────────────────────
 p_cl = sub.add_parser('check-closure')
 p_cl.add_argument('--closure-dir', default='weights_sbnd_closure/')
+p_cl.add_argument('--plot-dir', default='sbnd/plots_validation/')
 
 # ── make-fakedata ─────────────────────────────────────────────────────────────
 p_fd = sub.add_parser('make-fakedata')
@@ -37,6 +38,7 @@ p_fd.add_argument('--alpha', type=float, default=0.5)
 p_fd.add_argument('--universe-file', type=str, default=None)
 p_fd.add_argument('--universe-idx', type=int, default=0)
 p_fd.add_argument('--data-dir', default='../FormattedData_SBND/')
+p_fd.add_argument('--plot-dir', default='sbnd/plots_validation/')
 
 # ── run-syst ──────────────────────────────────────────────────────────────────
 p_sy = sub.add_parser('run-syst')
@@ -66,6 +68,9 @@ flags = parser.parse_args()
 # ═══════════════════════════════════════════════════════════════════════════════
 def do_check_closure():
     d = flags.closure_dir
+    PLOT_DIR = flags.plot_dir
+    os.makedirs(PLOT_DIR, exist_ok=True)
+
     def itn(p):
         m = re.search(r'Iter(\d+)', p)
         return int(m.group(1)) if m else -1
@@ -84,9 +89,6 @@ def do_check_closure():
     print("  CLOSURE TEST PASSED" if passed else
           "  WARNING: closure test looks off — investigate before proceeding")
 
-    # FIX 5: save closure weight distribution plot
-    PLOT_DIR = "plots_sbnd_closure/"
-    os.makedirs(PLOT_DIR, exist_ok=True)
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     axes[0].hist(push, bins=80, color="steelblue", alpha=0.8)
     axes[0].axvline(1.0, color="red", linestyle="--", linewidth=2)
@@ -96,10 +98,6 @@ def do_check_closure():
     axes[1].axvline(1.0, color="red", linestyle="--", linewidth=2)
     axes[1].set_xlabel("Pull weight"); axes[1].set_ylabel("Events")
     axes[1].set_title(f"Closure pull weights (mean={pull.mean():.4f}, std={pull.std():.4f})")
-    # Show all iterations if multiple available
-    for fi in push_files:
-        w = np.load(fi)
-        label = f"Iter {itn(fi)+1}"
     plt.tight_layout()
     plt.savefig(f"{PLOT_DIR}/closure_weight_distributions.png", dpi=150)
     plt.close()
@@ -136,7 +134,7 @@ def do_make_fakedata():
 
     print(f"Loaded {n:,} events from {OUT}")
 
-    PLOT_DIR = f'plots_sbnd_fakedata_{tag}/'
+    PLOT_DIR = flags.plot_dir
     os.makedirs(PLOT_DIR, exist_ok=True)
 
     if flags.mode == 'tilt':
@@ -171,8 +169,8 @@ def do_make_fakedata():
         axes[2].set_xlabel('true_p [MeV/c]'); axes[2].set_ylabel('Tilt weight')
         axes[2].set_title(f'Tilt function (alpha={ALPHA})')
         plt.tight_layout()
-        plt.savefig(f'{PLOT_DIR}/sbnd_fakedata_injected_{tag}.png', dpi=150)
-        print(f"  Plot: {PLOT_DIR}/sbnd_fakedata_injected_{tag}.png")
+        plt.savefig(f'{PLOT_DIR}/fakedata_injected_{tag}.png', dpi=150)
+        print(f"  Plot: {PLOT_DIR}/fakedata_injected_{tag}.png")
 
     elif flags.mode == 'universe':
         print("=== BNB Universe Mode ===")
@@ -274,7 +272,7 @@ def do_run_ml_unc():
             'FILE_DATA_WEIGHT': data_weight_file,
             'FILE_MC_RECO_WEIGHT': 'mc_weights_reco.npy',
             'FILE_MC_GEN_WEIGHT': 'mc_weights_truth.npy',
-            'NITER': flags.niter, 'NTRIAL': 1,   # single network per replica
+            'NITER': flags.niter, 'NTRIAL': 1,
             'LR': 1e-3, 'BATCH_SIZE': 512, 'EPOCHS': flags.epochs,
             'NAME': f'sbnd_ml_unc_{tag}', 'NPATIENCE': 10,
         }

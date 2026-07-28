@@ -194,4 +194,4 @@ weight_i = 1 + alpha * (log(p_i) - mean(log(p))) / std(log(p))
 
 ## Credits
 
-Based on OmniFold from [rhuang1/OmnifoldT2K](https://github.com/rhuang1/OmnifoldT2K). SBND adaptation by Castaly Fan with guidance from Roger Huang and Afroditi Papadopoulou.
+Based on OmniFold from [rhuang1/OmnifoldT2K](https://github.com/rhuang1/OmnifoldT2K). SBND adaptation by Castaly Fan with guidance from Roger Huang.

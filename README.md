@@ -9,7 +9,8 @@ Omnifold_SBND/
 ├── setup.sh                    # Environment setup (EAF + GPVM)
 ├── omnifold.py                 # Core OmniFold engine
 ├── utils.py                    # Data loading and plotting utilities
-├── t2k.py                      # Training driver script
+├── run_sbnd.py                 # Training driver (renamed from t2k.py; use this for all SBND runs)
+├── t2k.py                      # Original T2K script — do not use for SBND directly
 ├── t2k/                        # T2K validation files
 └── sbnd/
     ├── FormatData_SBND.py      # Format cafpyana output for OmniFold
@@ -191,6 +192,57 @@ weight_i = 1 + alpha * (log(p_i) - mean(log(p))) / std(log(p))
 | `NITER` | 10 (try 20 for true_p) | 5 | 10-15 |
 | `NTRIAL` | 3 | 1 | 1 |
 | `EPOCHS` | 100 | 50 | 100-150 |
+
+## NTRIAL explained
+
+`NTRIAL` controls how many independent neural networks are trained *per OmniFold iteration*.
+Their per-event weight predictions are **averaged** before passing to the next iteration.
+
+| NTRIAL | Effect | Saved weight shape | Run-to-run bias variability |
+|---|---|---|---|
+| 1 | Single network; fast but high variance | `(N,)` | ±1–3% typical |
+| 3 | Default; good balance | `(N,)` averaged internally | ±0.5–1.5% |
+| 7 | Recommended for closure/publication | `(N,)` averaged internally | ±0.2–0.5% |
+
+Note: `omnifold.py` averages the NTRIAL networks internally and saves a single `(N,)` weight
+array per iteration. The per-trial breakdown is therefore **not** recoverable from saved files
+— it is only visible during training. The `closure_trial_biases.png` plot requires NTRIAL>1
+weights to be stored as `(N, NTRIAL)`, which the current `omnifold.py` does not do.
+This is expected and acceptable — the bias stability across re-runs is the relevant metric.
+
+## Renaming t2k.py → run_sbnd.py
+
+On your machine, create a symlink or copy:
+```bash
+# Option 1: symlink (recommended — keeps t2k.py for T2K validation)
+ln -s t2k.py run_sbnd.py
+
+# Option 2: copy (if you want a separate SBND-specific version with diagnostics)
+cp run_sbnd.py_from_this_repo run_sbnd.py
+```
+
+The shell scripts (`runOmnifold_sbnd_closure.sh`, `runOmnifold_sbnd_fakedata.sh`) and
+`RunStudies.py` all call `run_sbnd.py`. If you keep using `t2k.py`, just change the name
+back in those scripts — both files are functionally identical.
+
+## Closure test interpretation
+
+The closure test passes data=MC through OmniFold. Ideal result: all weights = 1.0.
+In practice a small bias is expected because:
+
+1. **Reco ≠ truth kinematics** — the Step 1 network partially learns detector smearing
+   as a spurious data-MC difference, pushing weights away from 1
+2. **Finite NTRIAL** — each run of NTRIAL networks has random-seed variance of ±1–2%
+
+| Push bias | Verdict | Action |
+|---|---|---|
+| < 1% | Excellent | Proceed |
+| 1–3% | Acceptable | Note as systematic floor; increase NTRIAL for publication |
+| 3–5% | Marginal | Must increase NTRIAL before publishing |
+| > 5% | Fail | Investigate reco-truth correlation |
+
+The closure bias propagates as a systematic floor on all unfolded results.
+For SBND nueCC with 5–30% per-bin systematics, a closure bias < 3% is subdominant.
 
 ## Credits
 

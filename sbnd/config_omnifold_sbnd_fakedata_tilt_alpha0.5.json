@@ -8,7 +8,7 @@
   "FILE_DATA_WEIGHT":    "data_weights_sbnd_fakedata_tilt_alpha0.5.npy",
   "FILE_MC_RECO_WEIGHT": "mc_weights_reco.npy",
   "FILE_MC_GEN_WEIGHT":  "mc_weights_truth.npy",
-  "NITER":    20,
+  "NITER":    10,
   "NTRIAL":   3,
   "LR":       1e-3,
   "BATCH_SIZE": 512,

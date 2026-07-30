@@ -78,6 +78,27 @@ def iter_num(p):
     m = re.search(r'Iter(\d+)', p)
     return int(m.group(1)) if m else -1
 
+
+def dedup_push_files(files):
+    """Keep only the last-trial file per iteration number.
+
+    With NTRIAL>1, omnifold saves e.g.:
+      Step2_Iter1_Trial0_PushWeights.npy
+      Step2_Iter1_Trial1_PushWeights.npy
+      Step2_Iter1_Trial2_PushWeights.npy
+    OR it may save a single averaged file:
+      Step2_Iter1_PushWeights.npy
+    This function keeps one representative file per iteration (the last
+    alphabetically, which is the highest trial index or the averaged file).
+    """
+    from collections import defaultdict
+    by_iter = defaultdict(list)
+    for f in files:
+        by_iter[iter_num(f)].append(f)
+    # For each iteration keep the last file (averaged or highest trial)
+    deduped = [sorted(v)[-1] for k, v in sorted(by_iter.items())]
+    return deduped
+
 def chi2_simple(obs, exp):
     mask = exp > 0
     return np.sum((obs[mask] - exp[mask])**2 / exp[mask])
@@ -100,7 +121,7 @@ def do_validation():
     injected_tilt = np.load(tilt_path)
     true_p, true_costheta = truth_raw[:, 0], truth_raw[:, 1]
 
-    push_files = sorted(glob.glob(WEIGHTS_DIR + 'Step2_Iter*_PushWeights.npy'), key=iter_num)
+    push_files = dedup_push_files(sorted(glob.glob(WEIGHTS_DIR + 'Step2_Iter*_PushWeights.npy'), key=iter_num))
     if not push_files:
         print(f"ERROR: No push files found in '{WEIGHTS_DIR}'")
         print(f"  OmniFold has not been trained for tag '{TAG}' yet.")
@@ -178,7 +199,12 @@ def do_validation():
             h, _ = np.histogram(vv, bins=bins, weights=mc_weights * push)
             pi.append(it + 1); pc.append(chi2_simple(h, truth_h) / ndf)
         curves[vn] = (pi, pc)
-        print(f"  {vn} (ndf={ndf}): prior={pc[0]:.4f}, final={pc[-1]:.4f}")
+        # Print full table like the slide output
+        print(f"\n  {vn}  (ndf={ndf})")
+        print(f"  {'Iter':>6s}  {'chi2/ndf':>10s}")
+        for it, c2 in zip(pi, pc):
+            note = "  <- prior (no unfolding)" if it == 0 else ""
+            print(f"  {it:6d}  {c2:10.4f}{note}")
 
     fig, ax = plt.subplots(figsize=(8, 6))
     all_vals = []
@@ -210,16 +236,18 @@ def do_validation():
         ax.set_xlabel(XLABEL[vn]); ax.set_ylabel(r'Per-bin $\chi^2$ contribution')
         ax.set_title(f'{vn}: total $\\chi^2$={chi2_full:.2f}, ndf={ndf_full}'); ax.legend()
         print(f"\n  {vn} (total={chi2_full:.2f}, chi2/ndf={chi2_full/ndf_full:.2f}):")
+        bfmt = ".0f" if vn == "true_p" else ".2f"
         for i in range(n_bins):
             frac = per_bin[i] / chi2_full if chi2_full > 0 else 0
             chi2_wo = chi2_simple(np.delete(unf_h, i), np.delete(truth_h, i))
-            print(f"    [{bins[i]:6.0f},{bins[i+1]:6.0f}]  chi2={per_bin[i]:8.2f}  "
+            lo = f"{bins[i]:{bfmt}}"; hi = f"{bins[i+1]:{bfmt}}"
+            print(f"    [{lo:>7s},{hi:>7s}]  chi2={per_bin[i]:8.2f}  "
                   f"w/o={chi2_wo:8.2f}  frac={frac:.1%}")
     plt.tight_layout()
     plt.savefig(f'{PLOT_DIR}/fakedata_{TAG}_chi2_bin_diagnostic.png', dpi=150); plt.close()
     print(f"  fakedata_{TAG}_chi2_bin_diagnostic.png")
 
-    print(f"\n  Push weight stats per iteration:")
+    print(f"\n  Push weight stats per iteration (one entry per iteration after dedup):")
     for f in push_files:
         w = np.load(f); w = w if w.ndim == 1 else w.mean(axis=0)
         print(f"    Iter {iter_num(f)+1:2d}: mean={w.mean():.4f}, std={w.std():.4f}")
@@ -235,7 +263,7 @@ def do_paper():
         print(f"ERROR: {tilt_file} not found"); return
     injected = np.load(tilt_file)
     tilt_dir = f'weights_sbnd_fakedata_{TAG}/'
-    push_files = sorted(glob.glob(tilt_dir + 'Step2_Iter*_PushWeights.npy'), key=iter_num)
+    push_files = dedup_push_files(sorted(glob.glob(tilt_dir + 'Step2_Iter*_PushWeights.npy'), key=iter_num))
     if not push_files:
         print(f"ERROR: No push files in '{tilt_dir}'")
         print(f"  Train first: bash sbnd/runOmnifold_sbnd_fakedata.sh {TAG}"); return

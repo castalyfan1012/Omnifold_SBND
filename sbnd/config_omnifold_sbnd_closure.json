@@ -9,7 +9,7 @@
 'FILE_MC_RECO_WEIGHT': 'mc_weights_reco.npy',
 'FILE_MC_GEN_WEIGHT':  'mc_weights_truth.npy',
 'NITER': 10,
-'NTRIAL': 3,
+'NTRIAL': 7,
 'LR': 1e-3,
 'BATCH_SIZE': 512,
 'EPOCHS': 100,

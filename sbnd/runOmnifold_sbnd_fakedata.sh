@@ -43,7 +43,7 @@ EOF
 echo "  Config written: ${CONFIG}"
 echo ""
 
-python3 t2k.py \
+python3 run_sbnd.py \
     --config "${CONFIG}" \
     --file_path "${DATA_DIR}" \
     --weights_folder "${WEIGHTS_DIR}" \

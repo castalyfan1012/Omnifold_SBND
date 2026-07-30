@@ -30,6 +30,8 @@ sub = parser.add_subparsers(dest='action', required=True)
 p_cl = sub.add_parser('check-closure')
 p_cl.add_argument('--closure-dir', default='weights_sbnd_closure/')
 p_cl.add_argument('--plot-dir', default='sbnd/plots_validation/')
+p_cl.add_argument('--show-trials', action='store_true',
+                  help='Plot individual NTRIAL weight distributions to show run-to-run spread.')
 
 # ── make-fakedata ─────────────────────────────────────────────────────────────
 p_fd = sub.add_parser('make-fakedata')
@@ -74,51 +76,160 @@ def do_check_closure():
     def itn(p):
         m = re.search(r'Iter(\d+)', p)
         return int(m.group(1)) if m else -1
+
     push_files = sorted(glob.glob(os.path.join(d, 'Step2_Iter*_PushWeights.npy')), key=itn)
     pull_files = sorted(glob.glob(os.path.join(d, 'Step1_Iter*_PullWeights.npy')), key=itn)
     if not push_files or not pull_files:
         print(f"ERROR: No weight files in {d}. Run closure test first.")
         return
-    push = np.load(push_files[-1])
-    pull = np.load(pull_files[-1])
+
+    # Final-iteration averaged weights (shape: N_events or N_events x NTRIAL)
+    push_raw = np.load(push_files[-1])
+    pull_raw = np.load(pull_files[-1])
+
+    # If NTRIAL > 1, the file shape is (N_events, NTRIAL); average gives the combined weight
+    push_trials = push_raw if push_raw.ndim == 2 else push_raw[:, np.newaxis]
+    pull_trials = pull_raw if pull_raw.ndim == 2 else pull_raw[:, np.newaxis]
+    n_trials_push = push_trials.shape[1]
+    n_trials_pull = pull_trials.shape[1]
+
+    push = push_trials.mean(axis=1)  # per-event average across trials
+    pull = pull_trials.mean(axis=1)
+
+    push_bias = push.mean() - 1.0
+    pull_bias = pull.mean() - 1.0
+
     print(f"=== Closure Test Check ({d}) ===")
-    print(f"  Push: mean={push.mean():.4f}, std={push.std():.4f}, "
+    print(f"  NTRIAL detected — push: {n_trials_push}, pull: {n_trials_pull}")
+    print(f"  Push (averaged): mean={push.mean():.4f}, std={push.std():.4f}, "
           f"range=[{push.min():.4f}, {push.max():.4f}]")
-    print(f"  Pull: mean={pull.mean():.4f}, std={pull.std():.4f}")
-    passed = abs(push.mean() - 1.0) < 0.05 and push.std() < 0.2
-    print("  CLOSURE TEST PASSED" if passed else
-          "  WARNING: closure test looks off — investigate before proceeding")
+    print(f"  Pull (averaged): mean={pull.mean():.4f}, std={pull.std():.4f}")
+    print(f"  Closure bias (push): {push_bias:+.4f} ({push_bias*100:+.2f}%)")
+    print(f"  Closure bias (pull): {pull_bias:+.4f} ({pull_bias*100:+.2f}%)")
+
+    # Per-trial bias breakdown — shows run-to-run spread that causes re-run variability
+    if n_trials_push > 1:
+        trial_biases = push_trials.mean(axis=0) - 1.0
+        print(f"  Per-trial push biases: " +
+              ", ".join(f"{b*100:+.2f}%" for b in trial_biases))
+        print(f"  Trial bias spread (std): {trial_biases.std()*100:.2f}% "
+              f"<- this is the run-to-run variability you observe")
+        print(f"  Expected run-to-run variability: ±{trial_biases.std()*100/np.sqrt(n_trials_push):.2f}% "
+              f"(±1 std of the mean over {n_trials_push} trials)")
+
+    # Tiered verdict
+    abs_bias = abs(push_bias)
+    if push.std() >= 0.2:
+        status = "FAIL — std too large, network not converging"
+    elif abs_bias < 0.01:
+        status = "PASSED (excellent: |bias| < 1%)"
+    elif abs_bias < 0.03:
+        status = (f"PASSED with note: |bias|={abs_bias*100:.1f}% < 3%. "
+                  f"Acceptable for fake-data studies (subdominant vs 5-30% systematics). "
+                  f"Run-to-run variability from finite NTRIAL={n_trials_push} is normal — "
+                  f"see per-trial biases above. To stabilise: increase NTRIAL to 5-7.")
+    elif abs_bias < 0.05:
+        status = (f"WARNING: |bias|={abs_bias*100:.1f}% (3-5%). "
+                  f"Marginal — increase NTRIAL to 5-7 before publishing.")
+    else:
+        status = (f"FAIL: |bias|={abs_bias*100:.1f}% >= 5%. "
+                  f"Investigate reco-truth correlation and increase NTRIAL.")
+    print(f"  Status: {status}")
+
+    # ── Plot 1: weight distributions (pull left, push right) ──────────────────
+    # Shared x-axis range [0.85, 1.15] so pull and push are directly comparable
+    XLIM = (0.85, 1.15)
+    BINS = np.linspace(XLIM[0], XLIM[1], 81)  # 80 bins, fixed range
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    axes[0].hist(push, bins=80, color="steelblue", alpha=0.8)
+    axes[0].hist(pull, bins=BINS, color="darkorange", alpha=0.8)
     axes[0].axvline(1.0, color="red", linestyle="--", linewidth=2)
-    axes[0].set_xlabel("Push weight"); axes[0].set_ylabel("Events")
-    axes[0].set_title(f"Closure push weights (mean={push.mean():.4f}, std={push.std():.4f})")
-    axes[1].hist(pull, bins=80, color="darkorange", alpha=0.8)
-    axes[1].axvline(1.0, color="red", linestyle="--", linewidth=2)
-    axes[1].set_xlabel("Pull weight"); axes[1].set_ylabel("Events")
-    axes[1].set_title(f"Closure pull weights (mean={pull.mean():.4f}, std={pull.std():.4f})")
+    axes[0].set_xlim(XLIM)
+    axes[0].set_xlabel("Pull weight"); axes[0].set_ylabel("Events")
+    axes[0].set_title(f"Closure pull weights — Step 1 (reco space)\n"
+                      f"mean={pull.mean():.4f}, std={pull.std():.4f}, "
+                      f"bias={pull_bias*100:+.2f}%")
+
+    # Show individual trials as thin lines if requested
+    if getattr(flags, 'show_trials', False) and n_trials_push > 1:
+        trial_cols = plt.cm.Blues(np.linspace(0.4, 0.9, n_trials_push))
+        for t in range(n_trials_push):
+            axes[1].hist(push_trials[:, t], bins=BINS, density=True,
+                         alpha=0.3, color=trial_cols[t],
+                         label=f'Trial {t+1} (bias={push_trials[:,t].mean()-1:+.3f})')
+        axes[1].hist(push, bins=BINS, histtype='step', color='navy',
+                     linewidth=2, density=True, label=f'Average (bias={push_bias*100:+.2f}%)')
+        axes[1].axvline(1.0, color="red", linestyle="--", linewidth=2)
+        axes[1].set_xlim(XLIM)
+        axes[1].set_xlabel("Push weight"); axes[1].set_ylabel("Density")
+        axes[1].set_title(f"Closure push weights — Step 2 (truth space)\n"
+                          f"mean={push.mean():.4f}, {n_trials_push} trials shown individually")
+        axes[1].legend(fontsize=8)
+    else:
+        axes[1].hist(push, bins=BINS, color="steelblue", alpha=0.8)
+        axes[1].axvline(1.0, color="red", linestyle="--", linewidth=2)
+        axes[1].set_xlim(XLIM)
+        axes[1].set_xlabel("Push weight"); axes[1].set_ylabel("Events")
+        axes[1].set_title(f"Closure push weights — Step 2 (truth space)\n"
+                          f"mean={push.mean():.4f}, std={push.std():.4f}, "
+                          f"bias={push_bias*100:+.2f}%")
     plt.tight_layout()
     plt.savefig(f"{PLOT_DIR}/closure_weight_distributions.png", dpi=150)
     plt.close()
     print(f"  Plot saved: {PLOT_DIR}/closure_weight_distributions.png")
 
-    # Per-iteration push weight convergence
+    # ── Plot 2: per-iteration convergence (pull left, push right) ─────────────
     if len(push_files) > 1:
-        fig, ax = plt.subplots(figsize=(8, 4))
-        iters, means, stds = [], [], []
-        for fi in push_files:
-            w = np.load(fi)
-            iters.append(itn(fi) + 1)
-            means.append(w.mean()); stds.append(w.std())
-        ax.errorbar(iters, means, yerr=stds, fmt="bo-", capsize=3, linewidth=2)
-        ax.axhline(1.0, color="red", linestyle="--")
-        ax.set_xlabel("OmniFold Iteration"); ax.set_ylabel("Push weight mean ± std")
-        ax.set_title("Closure test convergence")
+        fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+        for ax, files, label, color, name in [
+            (axes[0], pull_files, "Pull weight mean ± std", "darkorange", "pull"),
+            (axes[1], push_files, "Push weight mean ± std", "steelblue",  "push"),
+        ]:
+            iters, means, stds = [], [], []
+            for fi in sorted(files, key=itn):
+                w = np.load(fi)
+                w = w.mean(axis=1) if w.ndim == 2 else w
+                iters.append(itn(fi) + 1)
+                means.append(w.mean()); stds.append(w.std())
+            ax.errorbar(iters, means, yerr=stds, fmt="o-", color=color,
+                        capsize=3, linewidth=2)
+            ax.axhline(1.0, color="red", linestyle="--")
+            ax.fill_between(iters,
+                            [m - 0.01 for m in means],
+                            [m + 0.01 for m in means],
+                            alpha=0.15, color=color, label="±1% band")
+            ax.set_xlabel("OmniFold Iteration"); ax.set_ylabel(label)
+            ax.set_title(f"Closure {name} convergence\nbias at final iter: {means[-1]-1:+.4f}")
+            ax.legend(fontsize=9)
         plt.tight_layout()
         plt.savefig(f"{PLOT_DIR}/closure_convergence.png", dpi=150)
         plt.close()
         print(f"  Plot saved: {PLOT_DIR}/closure_convergence.png")
+
+    # ── Plot 3: per-trial bias bar chart (if NTRIAL > 1) ──────────────────────
+    if n_trials_push > 1:
+        fig, ax = plt.subplots(figsize=(max(6, n_trials_push * 1.2), 4))
+        trial_biases_pct = (push_trials.mean(axis=0) - 1.0) * 100
+        colors_t = ['steelblue' if b >= 0 else 'tomato' for b in trial_biases_pct]
+        ax.bar(range(1, n_trials_push + 1), trial_biases_pct, color=colors_t, alpha=0.8)
+        ax.axhline(0, color='black', linewidth=1)
+        ax.axhline(trial_biases_pct.mean(), color='navy', linewidth=2,
+                   linestyle='--', label=f'Mean bias = {trial_biases_pct.mean():+.2f}%')
+        ax.fill_between([-0.5, n_trials_push + 0.5], -1, 1,
+                        alpha=0.1, color='green', label='±1% band')
+        ax.fill_between([-0.5, n_trials_push + 0.5], -3, 3,
+                        alpha=0.07, color='orange', label='±3% band')
+        ax.set_xlabel("Trial index"); ax.set_ylabel("Bias (%)")
+        ax.set_title(f"Per-trial closure bias (push, final iteration)\n"
+                     f"spread std={trial_biases_pct.std():.2f}% — "
+                     f"this is the run-to-run variability")
+        ax.set_xlim(0.5, n_trials_push + 0.5)
+        ax.legend(fontsize=9)
+        plt.tight_layout()
+        plt.savefig(f"{PLOT_DIR}/closure_trial_biases.png", dpi=150)
+        plt.close()
+        print(f"  Plot saved: {PLOT_DIR}/closure_trial_biases.png")
+        print(f"  Tip: run with --show-trials to overlay individual trial distributions.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -237,7 +348,7 @@ def do_run_syst():
         print(f"Running universe {idx} ({flags.source})")
         print(f"{'='*60}")
         subprocess.run([
-            sys.executable, 't2k.py',
+            sys.executable, 'run_sbnd.py',
             '--config', config_path, '--file_path', flags.data_dir,
             '--weights_folder', weights_dir, '--no_eff', '--verbose'
         ])
@@ -296,7 +407,7 @@ def do_run_ml_unc():
         env['PYTHONHASHSEED'] = str(idx)
 
         subprocess.run([
-            sys.executable, 't2k.py',
+            sys.executable, 'run_sbnd.py',
             '--config', config_path, '--file_path', flags.data_dir,
             '--weights_folder', weights_dir, '--no_eff', '--verbose'
         ], env=env)

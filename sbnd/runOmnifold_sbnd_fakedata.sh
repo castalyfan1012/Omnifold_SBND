@@ -1,8 +1,25 @@
 #!/bin/bash
-# Usage:
-#   bash sbnd/runOmnifold_sbnd_fakedata.sh                  # default: tilt_alpha0.5
-#   bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.3     # custom tag
-#   bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.3 20  # custom tag + NITER
+# Usage (run from Omnifold_SBND/ directory):
+#   nohup bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.3     > fd03.log 2>&1 &
+#   nohup bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.5     > fd05.log 2>&1 &
+#   nohup bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.3 20  > fd03_n20.log 2>&1 &
+#
+# FIX: conda overrides PATH so python3/python resolve to /opt/conda, not the venv.
+# Use the venv python by absolute path instead.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+VENV_PYTHON="${REPO_DIR}/venv_omnifold/bin/python3"
+
+if [[ ! -f "${VENV_PYTHON}" ]]; then
+    echo "ERROR: venv python not found at ${VENV_PYTHON}"
+    echo "Run first: source setup.sh --install"
+    exit 1
+fi
+
+echo "Using python: ${VENV_PYTHON}"
+echo "Python version: $("${VENV_PYTHON}" --version 2>&1)"
+echo "TF version: $("${VENV_PYTHON}" -c 'import tensorflow as tf; print(tf.__version__)')"
 
 TAG="${1:-tilt_alpha0.5}"
 NITER="${2:-10}"
@@ -17,9 +34,8 @@ echo "  DATA_DIR:    ${DATA_DIR}"
 
 mkdir -p "${WEIGHTS_DIR}"
 
-# Write config
 CONFIG="sbnd/config_omnifold_sbnd_fakedata_${TAG}.json"
-cat > "${CONFIG}" << EOF
+cat > "${CONFIG}" << JSONEOF
 {
   "FILE_MC_RECO":        "mc_vals_reco.npy",
   "FILE_MC_GEN":         "mc_vals_truth.npy",
@@ -38,12 +54,12 @@ cat > "${CONFIG}" << EOF
   "NAME":     "sbnd_fakedata_${TAG}",
   "NPATIENCE": 10
 }
-EOF
+JSONEOF
 
 echo "  Config written: ${CONFIG}"
 echo ""
 
-python3 run_sbnd.py \
+"${VENV_PYTHON}" run_sbnd.py \
     --config "${CONFIG}" \
     --file_path "${DATA_DIR}" \
     --weights_folder "${WEIGHTS_DIR}" \
@@ -52,5 +68,5 @@ python3 run_sbnd.py \
 
 echo ""
 echo "=== Done. Next steps: ==="
-echo "  python3 sbnd/MakePlots.py validation --tag ${TAG}"
-echo "  python3 sbnd/MakePlots.py paper --var both --tag ${TAG}"
+echo "  ${VENV_PYTHON} sbnd/MakePlots.py validation --tag ${TAG}"
+echo "  ${VENV_PYTHON} sbnd/MakePlots.py paper --var both --tag ${TAG}"

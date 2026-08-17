@@ -88,3 +88,54 @@ for i, v in enumerate(RECO_VARS):
     print(f"  reco  {v:20s}: {np.nanmin(reco_raw[:,i]):.2f} -- {np.nanmax(reco_raw[:,i]):.2f}")
 for i, v in enumerate(TRUTH_VARS):
     print(f"  truth {v:20s}: {np.nanmin(truth_raw[:,i]):.2f} -- {np.nanmax(truth_raw[:,i]):.2f}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Per-bin efficiency diagnostic
+# ═══════════════════════════════════════════════════════════════════════════════
+# Efficiency = N_selected_signal / N_all_signal_in_sample
+# Denominator is all is_sig events in sel_topo (passed through quality cuts but
+# not necessarily the final vertex-distance cut). This is a PARTIAL efficiency
+# measuring the vertex-distance cut acceptance on top of earlier stages.
+# For the full efficiency (including reco+quality), the pre-selection evtdf
+# would be needed.
+print(f"\n{'='*60}")
+print(f"Per-bin efficiency diagnostic")
+print(f"{'='*60}")
+
+all_signal = sel_topo[sel_topo['is_sig']].copy()
+print(f"  All signal in sample (is_sig):           {len(all_signal):,}")
+print(f"  Selected signal (is_sig & {FINAL_STAGE}): {len(selected_signal):,}")
+
+BINNING_EFF = {
+    'true_p':        np.array([0, 200, 400, 600, 800, 1000, 1400, 2000]),
+    'true_costheta': np.linspace(-1, 1, 11),
+}
+
+for var_name, bins in BINNING_EFF.items():
+    n_bins = len(bins) - 1
+
+    # Denominator: all signal events (before final cut, but with valid truth)
+    gen_vals = all_signal[var_name].values.astype(np.float32)
+    gen_valid = ~np.isnan(gen_vals)
+    gen_vals_clean = gen_vals[gen_valid]
+
+    # Numerator: selected signal (the events that made it into OmniFold)
+    sel_vals = selected_signal[var_name].values.astype(np.float32)
+
+    N_gen, _ = np.histogram(gen_vals_clean, bins=bins)
+    N_sel, _ = np.histogram(sel_vals, bins=bins)
+    eff = np.where(N_gen > 0, N_sel / N_gen, 0.0)
+
+    np.save(OUTPUT_DIR + f'efficiency_{var_name}.npy', eff)
+
+    print(f"\n  {var_name}:")
+    fmt = '.0f' if var_name == 'true_p' else '.2f'
+    print(f"  {'Bin':>20s}  {'N_gen':>8s}  {'N_sel':>8s}  {'Eff':>8s}")
+    for i in range(n_bins):
+        lo, hi = bins[i], bins[i+1]
+        print(f"  [{lo:{fmt}},{hi:{fmt}})  {N_gen[i]:8d}  {N_sel[i]:8d}  {eff[i]:8.4f}")
+    print(f"  Saved: {OUTPUT_DIR}efficiency_{var_name}.npy")
+
+print(f"\nNote: This efficiency is PARTIAL — it measures the {FINAL_STAGE}")
+print(f"cut acceptance on top of earlier selection stages. To get the full")
+print(f"efficiency, rerun with the pre-selection evtdf as input.")

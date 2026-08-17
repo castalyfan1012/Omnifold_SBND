@@ -26,7 +26,7 @@ sub = parser.add_subparsers(dest='action', required=True)
 
 # ── covariance ────────────────────────────────────────────────────────────────
 p_cov = sub.add_parser('covariance')
-p_cov.add_argument('--source', choices=['bnb', 'genie', 'mcstat', 'ml', 'all'],
+p_cov.add_argument('--source', choices=['bnb', 'genie', 'extra_xsec', 'g4', 'mcstat', 'ml', 'all'],
                     default='all')
 p_cov.add_argument('--var', choices=['true_p', 'true_costheta', 'both'],
                     default='both')
@@ -43,6 +43,11 @@ p_cov.add_argument('--ml-label', default=None,
                    help='Optional tag for the ML covariance file, e.g. "50rep_15iter". '
                         'Saves as covariance_ml_{label}_{var}.npz in addition to the standard '
                         'covariance_ml_{var}.npz so past runs are never overwritten.')
+p_cov.add_argument('--ml-as-stderr', action='store_true',
+                   help='Scale ML covariance by 1/N_replicas so it represents the standard '
+                        'error of the mean (appropriate when the final result averages all '
+                        'replicas). Without this flag, ML covariance represents the spread '
+                        'of a single replica (standard deviation).')
 
 # ── xsec ──────────────────────────────────────────────────────────────────────
 p_xs = sub.add_parser('xsec')
@@ -95,7 +100,7 @@ def build_covariance_single_var(var_name):
 
     # ── Determine sources ─────────────────────────────────────────────────────
     if flags.source == 'all':
-        sources = ['bnb', 'genie', 'mcstat']
+        sources = ['bnb', 'genie', 'extra_xsec', 'g4', 'mcstat']
         sources = [s for s in sources
                    if glob.glob(f'{flags.weights_base}/weights_{s}/{s}_univ*/Step2_Iter*_PushWeights.npy')]
         ml_dirs = sorted(glob.glob(flags.ml_weights_dir + 'replica_*/'))
@@ -157,10 +162,72 @@ def build_covariance_single_var(var_name):
     if n_univ == 0:
         print("ERROR: No universe results found."); return
 
-    # ── Combined statistics ───────────────────────────────────────────────────
+    # ── Per-source covariance computation ────────────────────────────────────
+    # Compute each source's covariance independently, then sum for the total.
+    # This allows --ml-as-stderr to scale ML by 1/N_replicas.
+    freeze_ml = getattr(flags, 'freeze_ml', False)
+    ml_as_stderr = getattr(flags, 'ml_as_stderr', False)
+    ml_label  = getattr(flags, 'ml_label', None)
+
+    cov_per_source = {}   # src -> (cov_matrix, mean_hist, n_universes)
+
+    for src, src_arr in hists_by_source.items():
+        if len(src_arr) < 2:
+            continue
+
+        # --freeze-ml: load from disk instead of recomputing
+        standard_path = f'{cov_dir}/covariance_{src}_{var_name}.npz'
+        if src == 'ml' and freeze_ml and os.path.exists(standard_path):
+            print(f"  --freeze-ml: loading existing {standard_path}")
+            cached = np.load(standard_path)
+            cov_per_source[src] = (cached['cov'], cached['mean_hist'],
+                                   int(cached['n_universes']))
+            continue
+
+        sm = src_arr.mean(axis=0)
+        sd = src_arr - sm[np.newaxis, :]
+        sc = (sd.T @ sd) / len(src_arr)
+
+        # Save per-source file (always the single-replica spread = std)
+        sf = np.zeros_like(sc)
+        for i in range(n_bins):
+            for j in range(n_bins):
+                d = sm[i] * sm[j]
+                if d > 0:
+                    sf[i, j] = sc[i, j] / d
+
+        payload = dict(cov=sc, frac_cov=sf, bins=bins,
+                       mean_hist=sm, nom_hist=nom_hist, all_hists=src_arr,
+                       n_universes=np.array(len(src_arr)))
+
+        if flags.source == 'all' or flags.source == src:
+            np.savez(standard_path, **payload)
+            print(f"  Per-source saved: covariance_{src}_{var_name}.npz "
+                  f"({len(src_arr)} universes)")
+
+        # For ML: also write a labelled snapshot
+        if src == 'ml' and flags.source in ('all', 'ml'):
+            label = ml_label or f"{len(src_arr)}rep"
+            snapshot_path = f'{cov_dir}/covariance_ml_{label}_{var_name}.npz'
+            np.savez(snapshot_path, **payload)
+            print(f"  ML snapshot saved: covariance_ml_{label}_{var_name}.npz")
+
+        cov_per_source[src] = (sc, sm, len(src_arr))
+
+    # ── Build total covariance as sum of per-source ───────────────────────────
+    cov = np.zeros((n_bins, n_bins))
+    for src, (sc, sm, n_u) in cov_per_source.items():
+        if src == 'ml' and ml_as_stderr:
+            # Standard error: Cov_ML / N_replicas
+            # (appropriate when final result averages all replicas)
+            cov += sc / n_u
+            print(f"  ML covariance scaled by 1/{n_u} (--ml-as-stderr): "
+                  f"√diag goes from {np.sqrt(np.diag(sc)).mean():.1f} "
+                  f"to {np.sqrt(np.diag(sc/n_u)).mean():.1f}")
+        else:
+            cov += sc
+
     mean_hist = all_hists.mean(axis=0)
-    diff = all_hists - mean_hist[np.newaxis, :]
-    cov  = (diff.T @ diff) / n_univ
     frac_cov = np.zeros_like(cov)
     for i in range(n_bins):
         for j in range(n_bins):
@@ -173,49 +240,8 @@ def build_covariance_single_var(var_name):
     # ── Save combined ─────────────────────────────────────────────────────────
     np.savez(f'{cov_dir}/covariance_{flags.source}_{var_name}.npz',
              cov=cov, frac_cov=frac_cov, bins=bins,
-             mean_hist=mean_hist, nom_hist=nom_hist, all_hists=all_hists)
-
-    # ── Save per-source when --source all ─────────────────────────────────────
-    if flags.source == 'all':
-        freeze_ml = getattr(flags, 'freeze_ml', False)
-        ml_label  = getattr(flags, 'ml_label', None)
-
-        for src, src_arr in hists_by_source.items():
-            if len(src_arr) < 2:
-                continue
-
-            # --freeze-ml: skip ML recompute if file already exists
-            standard_path = f'{cov_dir}/covariance_{src}_{var_name}.npz'
-            if src == 'ml' and freeze_ml and os.path.exists(standard_path):
-                print(f"  --freeze-ml: skipping ML recompute, "
-                      f"using existing {standard_path}")
-                continue
-
-            sm = src_arr.mean(axis=0)
-            sd = src_arr - sm[np.newaxis, :]
-            sc = (sd.T @ sd) / len(src_arr)
-            sf = np.zeros_like(sc)
-            for i in range(n_bins):
-                for j in range(n_bins):
-                    d = sm[i] * sm[j]
-                    if d > 0:
-                        sf[i, j] = sc[i, j] / d
-
-            payload = dict(cov=sc, frac_cov=sf, bins=bins,
-                           mean_hist=sm, nom_hist=nom_hist, all_hists=src_arr,
-                           n_universes=np.array(len(src_arr)))
-
-            # Always write the standard name (so downstream scripts find it)
-            np.savez(standard_path, **payload)
-            print(f"  Per-source saved: covariance_{src}_{var_name}.npz "
-                  f"({len(src_arr)} universes)")
-
-            # For ML: also write a labelled snapshot so it is never overwritten
-            if src == 'ml':
-                label = ml_label or f"{len(src_arr)}rep"
-                snapshot_path = f'{cov_dir}/covariance_ml_{label}_{var_name}.npz'
-                np.savez(snapshot_path, **payload)
-                print(f"  ML snapshot saved: covariance_ml_{label}_{var_name}.npz")
+             mean_hist=mean_hist, nom_hist=nom_hist, all_hists=all_hists,
+             ml_as_stderr=np.array(ml_as_stderr))
 
     # ── Print table ───────────────────────────────────────────────────────────
     print(f"\n{'Bin center':>10s} {'Nominal':>10s} {'Mean':>10s} "

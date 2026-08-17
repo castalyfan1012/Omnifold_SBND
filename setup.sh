@@ -6,13 +6,13 @@
 #   First time:  source setup.sh --install
 #   Every time:  source setup.sh
 #
-# Works on both EAF (AlmaLinux 9) and GPVM (SL7).
-# Creates a Python 3.9+ venv with TensorFlow CPU, numpy, etc.
+# After sourcing, `python3` will resolve to the venv python (even on EAF
+# where conda normally overrides PATH).
 # ============================================================================
 
 VENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/venv_omnifold"
+export VENV_PYTHON="${VENV_DIR}/bin/python3"
 
-# ── Helper: detect platform ─────────────────────────────────────────────────
 _detect_platform() {
     if [[ -f /etc/redhat-release ]]; then
         if grep -q "Scientific Linux" /etc/redhat-release 2>/dev/null; then
@@ -24,64 +24,56 @@ _detect_platform() {
         echo "UNKNOWN"
     fi
 }
-
 PLATFORM=$(_detect_platform)
 
-# ── Install mode ─────────────────────────────────────────────────────────────
 if [[ "$1" == "--install" ]]; then
     echo "=== OmniFold Setup: Installing ($PLATFORM) ==="
 
-    # Find python3
-    PY3=$(command -v python3 2>/dev/null)
-    if [[ -z "$PY3" ]]; then
-        echo "ERROR: python3 not found. On GPVM, try: setup python v3_9_2"
-        return 1
-    fi
-    PY_VER=$($PY3 --version 2>&1)
-    echo "Using: $PY3 ($PY_VER)"
+    # Use /usr/bin/python3 to avoid conda contamination
+    PY3=""
+    for candidate in /usr/bin/python3 /usr/local/bin/python3 $(command -v python3 2>/dev/null); do
+        if [[ -x "$candidate" ]]; then PY3="$candidate"; break; fi
+    done
+    if [[ -z "$PY3" ]]; then echo "ERROR: python3 not found."; return 1; fi
+    echo "Using base python: $PY3 ($($PY3 --version 2>&1))"
 
-    # Create venv
-    if [[ -d "$VENV_DIR" ]]; then
-        echo "Removing existing venv..."
-        rm -rf "$VENV_DIR"
-    fi
+    [[ -d "$VENV_DIR" ]] && rm -rf "$VENV_DIR"
     $PY3 -m venv "$VENV_DIR"
-    source "$VENV_DIR/bin/activate"
 
-    # Upgrade pip
-    pip install --upgrade pip setuptools wheel 2>/dev/null
-
-    # Core packages
-    pip install \
+    VENV_PIP="${VENV_DIR}/bin/pip"
+    "${VENV_PIP}" install --upgrade pip setuptools wheel
+    "${VENV_PIP}" install \
         numpy scipy matplotlib scikit-learn pandas \
         tensorflow-cpu==2.15.0 \
         pyyaml tqdm h5py tables
+    [[ "$PLATFORM" == "SL7" ]] && "${VENV_PIP}" install "urllib3<2"
+    "${VENV_PIP}" install uproot awkward 2>/dev/null || true
 
-    # SL7-specific: urllib3 v2 requires OpenSSL 1.1.1+, SL7 has 1.0.2
-    if [[ "$PLATFORM" == "SL7" ]]; then
-        echo "SL7 detected: pinning urllib3<2 for OpenSSL compatibility"
-        pip install "urllib3<2"
+    echo ""
+    TF_VER=$("${VENV_PYTHON}" -c 'import tensorflow as tf; print(tf.__version__)' 2>&1)
+    if [[ "$TF_VER" == 2* ]]; then
+        echo "TF OK: ${TF_VER}"
+    else
+        echo "ERROR: TF import failed: ${TF_VER}"; return 1
     fi
-
-    # Optional: for T2K ROOT file processing
-    pip install uproot awkward 2>/dev/null || true
-
     echo ""
     echo "=== Installation complete ==="
-    echo "Venv location: $VENV_DIR"
-    echo "Python: $(which python) ($(python --version 2>&1))"
-    echo "TF version: $(python -c 'import tensorflow as tf; print(tf.__version__)' 2>/dev/null)"
-    echo ""
-    echo "Next time, just run: source setup.sh"
+    echo "Next: source setup.sh"
     return 0
 fi
 
 # ── Activate mode (default) ──────────────────────────────────────────────────
-if [[ ! -d "$VENV_DIR" ]]; then
-    echo "ERROR: venv not found at $VENV_DIR"
-    echo "Run first: source setup.sh --install"
+if [[ ! -f "${VENV_PYTHON}" ]]; then
+    echo "ERROR: venv not found. Run: source setup.sh --install"
     return 1
 fi
 
-source "$VENV_DIR/bin/activate"
-echo "OmniFold env activated ($PLATFORM) — $(python --version 2>&1)"
+source "${VENV_DIR}/bin/activate"
+
+# Force venv bin FIRST in PATH, ahead of conda
+export PATH="${VENV_DIR}/bin:${PATH}"
+hash -r  # clear bash command cache
+
+TF_VER=$("${VENV_PYTHON}" -c 'import tensorflow as tf; print(tf.__version__)' 2>/dev/null)
+echo "OmniFold env ($PLATFORM) — python3 → $(which python3)"
+echo "TF: ${TF_VER:-NOT FOUND}"

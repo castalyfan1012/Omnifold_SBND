@@ -44,7 +44,7 @@ p_fd.add_argument('--plot-dir', default='sbnd/plots_validation/')
 
 # ── run-syst ──────────────────────────────────────────────────────────────────
 p_sy = sub.add_parser('run-syst')
-p_sy.add_argument('--source', choices=['bnb', 'genie', 'mcstat'], required=True)
+p_sy.add_argument('--source', choices=['bnb', 'genie', 'extra_xsec', 'g4', 'mcstat'], required=True)
 p_sy.add_argument('--start', type=int, default=0)
 p_sy.add_argument('--end', type=int, default=100)
 p_sy.add_argument('--data-dir', default='../FormattedData_SBND/')
@@ -141,7 +141,7 @@ def do_check_closure():
     XLIM = (0.85, 1.15)
     BINS = np.linspace(XLIM[0], XLIM[1], 81)  # 80 bins, fixed range
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4))
     axes[0].hist(pull, bins=BINS, color="darkorange", alpha=0.8)
     axes[0].axvline(1.0, color="red", linestyle="--", linewidth=2)
     axes[0].set_xlim(XLIM)
@@ -180,7 +180,7 @@ def do_check_closure():
 
     # ── Plot 2: per-iteration convergence (pull left, push right) ─────────────
     if len(push_files) > 1:
-        fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+        fig, axes = plt.subplots(1, 2, figsize=(9, 4))
         for ax, files, label, color, name in [
             (axes[0], pull_files, "Pull weight mean ± std", "darkorange", "pull"),
             (axes[1], push_files, "Push weight mean ± std", "steelblue",  "push"),
@@ -200,6 +200,7 @@ def do_check_closure():
                             alpha=0.15, color=color, label="±1% band")
             ax.set_xlabel("OmniFold Iteration"); ax.set_ylabel(label)
             ax.set_title(f"Closure {name} convergence\nbias at final iter: {means[-1]-1:+.4f}")
+            ax.set_ylim(0.95, 1.05)
             ax.legend(fontsize=9)
         plt.tight_layout()
         plt.savefig(f"{PLOT_DIR}/closure_convergence.png", dpi=150)

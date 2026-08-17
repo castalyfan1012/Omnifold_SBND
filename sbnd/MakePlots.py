@@ -42,22 +42,31 @@ p_val.add_argument('--plot-dir', default='sbnd/plots_validation/')
 
 p_pap = sub.add_parser('paper')
 p_pap.add_argument('--var', choices=['true_p', 'true_costheta', 'both'], default='both')
-p_pap.add_argument('--tag', default='tilt_alpha0.5')
+p_pap.add_argument('--tag', default='tilt_alpha0.3')
 p_pap.add_argument('--data-dir', default='../FormattedData_SBND/')
 p_pap.add_argument('--weights-base', default='sbnd')
 p_pap.add_argument('--export-dir', default='sbnd/exported_weights/')
 p_pap.add_argument('--plot-dir', default='sbnd/plots_xsec/')
+p_pap.add_argument('--syst-dir', default='sbnd/plots_syst/')
+p_pap.add_argument('--val-dir', default='sbnd/plots_validation/')
 p_pap.add_argument('--cov-dir', default='sbnd/covariance/')
+p_pap.add_argument('--ml-weights-dir', default='sbnd/weights_ml_unc/',
+                   help='Directory containing replica_*/ subdirs. If replicas exist '
+                        'AND their NTRIAL matches the main run, their averaged final '
+                        'weights are used as the central result automatically.')
 
 p_all = sub.add_parser('all')
 p_all.add_argument('--var', choices=['true_p', 'true_costheta', 'both'], default='both')
-p_all.add_argument('--tag', default='tilt_alpha0.5')
+p_all.add_argument('--tag', default='tilt_alpha0.3')
 p_all.add_argument('--data-dir', default='../FormattedData_SBND/')
 p_all.add_argument('--weights-base', default='sbnd')
 p_all.add_argument('--export-dir', default='sbnd/exported_weights/')
 p_all.add_argument('--plot-dir', default='sbnd/plots_xsec/')
+p_all.add_argument('--syst-dir', default='sbnd/plots_syst/')
+p_all.add_argument('--val-dir', default='sbnd/plots_validation/')
 p_all.add_argument('--cov-dir', default='sbnd/covariance/')
 p_all.add_argument('--val-plot-dir', default='sbnd/plots_validation/')
+p_all.add_argument('--ml-weights-dir', default='sbnd/weights_ml_unc/')
 
 flags = parser.parse_args()
 
@@ -219,6 +228,61 @@ def do_validation():
     plt.savefig(f'{PLOT_DIR}/fakedata_{TAG}_chi2_convergence.png', dpi=150); plt.close()
     print(f"  fakedata_{TAG}_chi2_convergence.png")
 
+    # ── Chi2 convergence excluding lowest bin(s) ────────────────────────────
+    # Roger: "show a version of the chi2 vs iteration plot for electron momentum
+    #         that excludes the lowest bin"
+    print(f"\n  === Chi2 convergence excluding lowest bin(s) ===")
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    for ax_idx, (n_excl, title_sfx) in enumerate([
+        (1, 'excl. lowest bin'), (2, 'excl. 2 lowest bins')
+    ]):
+        ax = axes[ax_idx]
+        all_vals_ex = []
+        for vn, vv in var_data.items():
+            bins = BINNING[vn]; n_bins_v = len(bins) - 1
+            keep = list(range(n_excl, n_bins_v))
+            ndf_ex = len(keep) - 1
+            if ndf_ex < 1:
+                continue
+            truth_h, _ = np.histogram(vv, bins=bins, weights=mc_weights * injected_tilt)
+            nom_h, _   = np.histogram(vv, bins=bins, weights=mc_weights)
+
+            def _chi2_keep(obs, exp, keep_idx):
+                return sum((obs[k] - exp[k])**2 / exp[k] for k in keep_idx if exp[k] > 0)
+
+            pi_ex = [0]
+            pc_ex = [_chi2_keep(nom_h, truth_h, keep) / ndf_ex]
+            for f in push_files:
+                push = np.load(f)
+                push = push if push.ndim == 1 else push.mean(axis=0)
+                h, _ = np.histogram(vv, bins=bins, weights=mc_weights * push)
+                pi_ex.append(iter_num(f) + 1)
+                pc_ex.append(_chi2_keep(h, truth_h, keep) / ndf_ex)
+            ax.plot(pi_ex, pc_ex, 'o-', color=colors_var[vn], linewidth=2,
+                    markersize=5, label=labels_var[vn])
+            all_vals_ex.extend(pc_ex)
+            excl_bins_str = ', '.join(f'[{bins[k]:.0f},{bins[k+1]:.0f}]'
+                                      if vn == 'true_p'
+                                      else f'[{bins[k]:.1f},{bins[k+1]:.1f}]'
+                                      for k in range(n_excl))
+            print(f"  {vn} excl {excl_bins_str}: "
+                  f"prior={pc_ex[0]:.4f}, final={pc_ex[-1]:.4f}  (ndf={ndf_ex})")
+        if all_vals_ex:
+            ax.axhline(1.0, color='gray', linestyle=':', linewidth=1,
+                       label=r'$\chi^2$/DoF = 1')
+            ax.set_xlabel('OmniFold Iteration')
+            ax.set_ylabel(r'$\chi^2$/DoF')
+            ax.set_title(rf'{title_sfx} ({TAG})')
+            ax.legend(fontsize=10); ax.set_yscale('log')
+            pos = [v for v in all_vals_ex if v > 0]
+            if pos:
+                ax.set_ylim(min(pos) * 0.5, max(pos) * 3)
+            ax.set_xticks(pi_ex)
+    plt.tight_layout()
+    plt.savefig(f'{PLOT_DIR}/fakedata_{TAG}_chi2_exclude_bins.png', dpi=150)
+    plt.close()
+    print(f"  fakedata_{TAG}_chi2_exclude_bins.png")
+
     print(f"\n  === Bin-removal chi2 diagnostic ===")
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     for ax, (vn, vv) in zip(axes, var_data.items()):
@@ -256,19 +320,54 @@ def do_validation():
 def do_paper():
     TAG = flags.tag
     os.makedirs(flags.plot_dir, exist_ok=True)
+    syst_dir = getattr(flags, 'syst_dir', 'sbnd/plots_syst/')
+    val_dir  = getattr(flags, 'val_dir', 'sbnd/plots_validation/')
+    os.makedirs(syst_dir, exist_ok=True)
+    os.makedirs(val_dir, exist_ok=True)
     truth_raw  = np.load(flags.data_dir + 'mc_vals_truth_NoNorm.npy')
     mc_weights = np.load(flags.data_dir + 'mc_weights_reco.npy')
     tilt_file  = flags.data_dir + f'truth_weights_sbnd_fakedata_{TAG}.npy'
     if not os.path.exists(tilt_file):
         print(f"ERROR: {tilt_file} not found"); return
     injected = np.load(tilt_file)
+
+    # ── Load push weights: prefer averaged ML replicas if available ───────────
+    # The convergence/snapshot push_files always come from the main fakedata
+    # run (full NITER=10) so the iteration axis is always correct.
     tilt_dir = f'weights_sbnd_fakedata_{TAG}/'
     push_files = dedup_push_files(sorted(glob.glob(tilt_dir + 'Step2_Iter*_PushWeights.npy'), key=iter_num))
     if not push_files:
         print(f"ERROR: No push files in '{tilt_dir}'")
         print(f"  Train first: bash sbnd/runOmnifold_sbnd_fakedata.sh {TAG}"); return
-    push_final = np.load(push_files[-1])
-    push_final = push_final if push_final.ndim == 1 else push_final.mean(axis=0)
+
+    ml_dir = getattr(flags, 'ml_weights_dir', 'sbnd/weights_ml_unc/')
+    replica_dirs = sorted(glob.glob(ml_dir + 'replica_*/'))
+    replica_finals = []
+    for rdir in replica_dirs:
+        pf = sorted(glob.glob(rdir + 'Step2_Iter*_PushWeights.npy'), key=iter_num)
+        if pf:
+            w = np.load(pf[-1])
+            replica_finals.append(w if w.ndim == 1 else w.mean(axis=0))
+
+    if len(replica_finals) >= 2:
+        # Check shape compatibility with main run
+        main_shape = np.load(push_files[-1]).shape
+        compatible = [w for w in replica_finals if w.shape == main_shape]
+        if len(compatible) >= 2:
+            push_final = np.mean(compatible, axis=0)
+            print(f"  Central result: mean of {len(compatible)} ML replicas "
+                  f"(ML unc = σ/√{len(compatible)})")
+        else:
+            push_final = np.load(push_files[-1])
+            push_final = push_final if push_final.ndim == 1 else push_final.mean(axis=0)
+            print(f"  Central result: main fakedata run (replicas have incompatible shape)")
+    else:
+        push_final = np.load(push_files[-1])
+        push_final = push_final if push_final.ndim == 1 else push_final.mean(axis=0)
+        if replica_dirs:
+            print(f"  Central result: main fakedata run (only {len(replica_finals)} replicas found, need ≥2)")
+        else:
+            print(f"  Central result: main fakedata run (no ML replicas found in {ml_dir})")
     vars_to_run = (['true_p', 'true_costheta'] if flags.var == 'both' else [flags.var])
     for vn in vars_to_run:
         _make_core_plots(vn, TAG, truth_raw, mc_weights, injected, push_files, push_final)
@@ -341,24 +440,42 @@ def _make_core_plots(var_name, TAG, truth_raw, mc_weights, injected, push_files,
 
     # uncertainty budget [TAG-INDEPENDENT]
     fig, ax = plt.subplots(figsize=(8, 6))
-    csrc = {'bnb':'blue','genie':'red','mcstat':'green','ml':'purple'}
-    lsrc = {'bnb':'BNB Flux','genie':'GENIE XSec','mcstat':'MC Stat','ml':'ML/NN Init'}
-    for src in ['bnb','genie','mcstat','ml']:
+    csrc = {'bnb':'blue','genie':'red','extra_xsec':'orange','g4':'brown',
+            'mcstat':'green','ml':'purple'}
+    lsrc = {'bnb':'BNB Flux','genie':'GENIE XSec','extra_xsec':'Extra XSec',
+            'g4':'G4 Reint.','mcstat':'MC Stat','ml':'ML/NN Init'}
+    # Load combined cov to get the ml_as_stderr flag that was used
+    _combined_ml_as_stderr = False
+    if os.path.exists(cov_file):
+        _cd = np.load(cov_file)
+        _combined_ml_as_stderr = bool(_cd.get('ml_as_stderr', np.array(False)))
+    for src in ['bnb','genie','extra_xsec','g4','mcstat','ml']:
         cf = f'{flags.cov_dir}/covariance_{src}_{var_name}.npz'
         if not os.path.exists(cf): continue
-        d = np.load(cf); frac = np.sqrt(np.diag(d['cov'])) / d['mean_hist'].clip(1e-6)
-        n_u = int(d['n_universes']) if 'n_universes' in d else '?'
-        ax.step(bins, np.append(frac, frac[-1]), where='post', color=csrc[src], linewidth=1.5, label=f'{lsrc[src]} ({n_u})')
+        d = np.load(cf)
+        src_cov = d['cov'].copy()
+        # Apply stderr scaling to ML if the combined covariance used --ml-as-stderr
+        if src == 'ml' and _combined_ml_as_stderr and 'n_universes' in d:
+            n_u = int(d['n_universes'])
+            src_cov = src_cov / n_u
+            label_extra = f' (stderr, n={n_u})'
+        else:
+            n_u = int(d['n_universes']) if 'n_universes' in d else '?'
+            label_extra = f' ({n_u})'
+        frac = np.sqrt(np.diag(src_cov)) / d['mean_hist'].clip(1e-6)
+        ax.step(bins, np.append(frac, frac[-1]), where='post', color=csrc[src],
+                linewidth=1.5, label=f'{lsrc[src]}{label_extra}')
     if os.path.exists(cov_file):
         cd = np.load(cov_file); fa = np.sqrt(np.diag(cd['cov'])) / cd['mean_hist'].clip(1e-6)
         ax.step(bins, np.append(fa, fa[-1]), where='post', color='black', linewidth=2, label='Total')
     ax.set_xlabel(xlabel); ax.set_ylabel('Bin Fractional Uncertainty')
-    ax.set_title(r'Uncertainty budget: SBND $\nu_e$ CC'); ax.legend(); ax.set_xlim(bins[0], bins[-1])
+    ax.set_title(r'Uncertainty budget: SBND $\nu_e$ CC'); ax.legend(fontsize=9); ax.set_xlim(bins[0], bins[-1])
     ax.set_yscale('log'); ax.set_ylim(1e-3, 0.5); plt.tight_layout()
-    plt.savefig(f'{flags.plot_dir}/uncertainty_budget_{var_name}.png', dpi=150)
-    print(f"    uncertainty_budget_{var_name}.png"); plt.close()
+    syst_dir = getattr(flags, 'syst_dir', 'sbnd/plots_syst/')
+    plt.savefig(f'{syst_dir}/uncertainty_budget_{var_name}.png', dpi=150)
+    print(f"    uncertainty_budget_{var_name}.png -> plots_syst/"); plt.close()
 
-    # correlation [TAG-INDEPENDENT]
+    # correlation [TAG-INDEPENDENT] -> plots_xsec
     if os.path.exists(cov_file):
         cd = np.load(cov_file); cm = cd['cov']; dg = np.sqrt(np.diag(cm))
         corr = cm / np.outer(dg.clip(1e-10), dg.clip(1e-10))
@@ -395,8 +512,9 @@ def _make_combined_chi2(TAG, truth_raw, mc_weights, injected, push_files):
     ax.set_xlabel('OmniFold Iteration'); ax.set_ylabel(r'$\chi^2$/DoF')
     ax.set_title(rf'$\chi^2$ convergence ({TAG})'); ax.legend(fontsize=12); ax.set_yscale('log')
     ax.set_ylim(min(v for v in av if v > 0)*0.5, max(av)*3); ax.set_xticks(pi); plt.tight_layout()
-    plt.savefig(f'{flags.plot_dir}/chi2_convergence_{TAG}.png', dpi=150)
-    print(f"    chi2_convergence_{TAG}.png"); plt.close()
+    val_dir = getattr(flags, 'val_dir', 'sbnd/plots_validation/')
+    plt.savefig(f'{val_dir}/chi2_convergence_{TAG}.png', dpi=150)
+    print(f"    chi2_convergence_{TAG}.png -> plots_validation/"); plt.close()
 
 
 def _make_reweighting_snapshots(TAG, truth_raw, mc_weights, injected, push_files):

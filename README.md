@@ -1,6 +1,6 @@
 # Omnifold_SBND
 
-ML-based unbinned unfolding for the SBND νeCC inclusive cross-section measurement.
+ML-based unbinned unfolding for the SBND $\nu_e$ CC inclusive cross section measurement.
 Based on [OmniFold](https://arxiv.org/abs/1911.09107) and [Huang et al. (2025)](https://arxiv.org/abs/2504.06857).
 
 ---
@@ -8,8 +8,8 @@ Based on [OmniFold](https://arxiv.org/abs/1911.09107) and [Huang et al. (2025)](
 ## Setup
 
 ```bash
-source setup.sh --install   # first time only — creates venv, installs TF 2.15
-source setup.sh             # every session — fixes PATH so python3 → venv
+source setup.sh --install   # first time only 
+source setup.sh             # every session 
 ```
 
 After sourcing, `python3` resolves to the venv python even on EAF where conda
@@ -17,7 +17,7 @@ normally overrides PATH.
 
 ---
 
-## ⚠️ When the input data changes
+## When the input data changes
 
 If `FormatData_SBND.py` produces a different N_events (updated selection pkl,
 new production), **all weight files become invalid** and you get shape mismatches.
@@ -52,7 +52,7 @@ python3 sbnd/RunStudies.py check-closure
 ```
 Target: push bias < 1%.
 
-### Step 3 — Fake-data test (α = 0.3 only)
+### Step 3 — Fake-data test (default $\alpha$ = 0.3)
 ```bash
 python3 sbnd/RunStudies.py make-fakedata --mode tilt --alpha 0.3
 nohup bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.3 > fd03.log 2>&1 &
@@ -64,7 +64,7 @@ python3 sbnd/MakePlots.py validation --tag tilt_alpha0.3
 ```
 
 ### Step 5 — Export universe weights (in notebook)
-In `nue_syst_v2.ipynb`, re-run export cells for all sources.
+In `nue_syst.ipynb` [link here](https://github.com/castalyfan1012/cafpyana/blob/feature/cfan_nue_ana/analysis_village/nueCC/nue_syst.ipynb), re-run export cells for all sources.
 All output arrays must have shape `(N_events, N_universes)`.
 
 | Source | N_univ | Notebook key |
@@ -104,7 +104,7 @@ python3 sbnd/BuildResults.py covariance --source all --var both \
     --ml-as-stderr --freeze-ml
 ```
 
-### Step 9 — Cross-section + paper plots
+### Step 9 — Make plots for cross section analysis
 ```bash
 python3 sbnd/BuildResults.py xsec --var both --tag tilt_alpha0.3
 
@@ -178,20 +178,6 @@ The per-source `covariance_ml_*.npz` always stores the raw σ for diagnostics.
 The uncertainty budget plot reads `ml_as_stderr` from the combined covariance
 and applies the same scaling there, so the budget is always self-consistent.
 
-## Efficiency
-
-| true_p bin [MeV] | ε | N_sel | Note |
-|---|---|---|---|
-| [0, 200) | ~9% | ~59 | Below threshold — exclude from final result |
-| [200, 400) | ~43% | ~809 | |
-| [400, 600) | ~60% | ~977 | |
-| [600, 800) | ~63% | ~803 | |
-| [800, 1000) | ~72% | ~739 | |
-| [1000, 1400) | ~79% | ~1060 | |
-| [1400, 2000) | ~83% | ~827 | |
-
-The [0, 200) MeV bin has ~9% efficiency and drives 65% of fake-data chi2.
-It will be excluded from the final cross-section result.
 
 ## Configuration reference
 
@@ -211,7 +197,6 @@ It will be excluded from the final cross-section result.
 | 3–5% | Marginal — increase NTRIAL |
 | > 5% | Fail |
 
-Current result: **+0.43%** — excellent.
 
 ## Credits
 

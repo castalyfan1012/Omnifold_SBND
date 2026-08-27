@@ -283,6 +283,46 @@ def do_validation():
     plt.close()
     print(f"  fakedata_{TAG}_chi2_exclude_bins.png")
 
+    # ── Chi2 convergence with merged cosθ backward bins ──────────────────────
+    # Roger: "the chi2 vs iteration for cos-theta is not smooth ... I suspect
+    #         low statistics in backwards bins ... try merging them into one"
+    print(f"\n  === Chi2 with merged backward cosθ bins ===")
+    merged_cos_bins = np.array([-1.0, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for vn, vv, bins_to_use, color, label in [
+        ('true_costheta', true_costheta, BINNING['true_costheta'],
+         'blue', r'$\cos\theta$ (10 bins)'),
+        ('true_costheta_merged', true_costheta, merged_cos_bins,
+         'red', r'$\cos\theta$ (merged bwd → 6 bins)'),
+    ]:
+        ndf_m = len(bins_to_use) - 2
+        if ndf_m < 1:
+            continue
+        truth_h, _ = np.histogram(vv, bins=bins_to_use,
+                                  weights=mc_weights * injected_tilt)
+        nom_h, _ = np.histogram(vv, bins=bins_to_use, weights=mc_weights)
+        pi_m, pc_m = [0], [chi2_simple(nom_h, truth_h) / ndf_m]
+        for f in push_files:
+            push = np.load(f)
+            push = push if push.ndim == 1 else push.mean(axis=0)
+            h, _ = np.histogram(vv, bins=bins_to_use,
+                                weights=mc_weights * push)
+            pi_m.append(iter_num(f) + 1)
+            pc_m.append(chi2_simple(h, truth_h) / ndf_m)
+        ax.plot(pi_m, pc_m, 'o-', color=color, linewidth=2, markersize=5,
+                label=f'{label} (ndf={ndf_m})')
+        print(f"  {label}: prior={pc_m[0]:.4f}, final={pc_m[-1]:.4f}")
+    ax.axhline(1.0, color='gray', linestyle=':', linewidth=1,
+               label=r'$\chi^2$/DoF = 1')
+    ax.set_xlabel('OmniFold Iteration'); ax.set_ylabel(r'$\chi^2$/DoF')
+    ax.set_title(rf'Effect of merging backward $\cos\theta$ bins ({TAG})')
+    ax.legend(fontsize=10); ax.set_yscale('log')
+    ax.set_xticks(pi_m)
+    plt.tight_layout()
+    plt.savefig(f'{PLOT_DIR}/fakedata_{TAG}_chi2_merged_costheta.png', dpi=150)
+    plt.close()
+    print(f"  fakedata_{TAG}_chi2_merged_costheta.png")
+
     print(f"\n  === Bin-removal chi2 diagnostic ===")
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     for ax, (vn, vv) in zip(axes, var_data.items()):
@@ -607,16 +647,43 @@ def _make_weight_map_2d(TAG, truth_raw, mc_weights, push_final):
 
 
 def _make_weight_change(TAG, mc_weights, push_files):
-    N = 5; checkpoints = sorted(set([5, 10, len(push_files)]))
-    fig, ax = plt.subplots(figsize=(7, 5)); cpc = ['blue','orange','green']; ci = 0
-    for ti in checkpoints:
-        if ti > len(push_files): continue
-        start = max(0, ti - N)
-        ww = [np.load(f) if np.load(f).ndim == 1 else np.load(f).mean(axis=0) for f in push_files[start:ti]]
-        if len(ww) < 2: continue
-        avg = np.diff(np.array(ww), axis=0).mean(axis=0)
-        ax.hist(avg, bins=100, range=(-0.15, 0.15), density=True, alpha=0.6, color=cpc[ci], label=f'After {ti} iters'); ci += 1
-    ax.set_xlabel(f'Avg weight change (last {N} iters)'); ax.set_ylabel('Fraction')
+    N = 5
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    # Initial change (iter 1 → 2): large corrections
+    if len(push_files) >= 2:
+        w0 = np.load(push_files[0])
+        w0 = w0 if w0.ndim == 1 else w0.mean(axis=0)
+        w1 = np.load(push_files[1])
+        w1 = w1 if w1.ndim == 1 else w1.mean(axis=0)
+        ax.hist(w1 - w0, bins=100, range=(-0.15, 0.15), density=True,
+                alpha=0.5, color='red', label='Iters 1→2')
+
+    # After 5 iters
+    if len(push_files) >= 5:
+        ww = []
+        for f in push_files[0:5]:
+            w = np.load(f)
+            ww.append(w if w.ndim == 1 else w.mean(axis=0))
+        if len(ww) >= 2:
+            avg = np.diff(np.array(ww), axis=0).mean(axis=0)
+            ax.hist(avg, bins=100, range=(-0.15, 0.15), density=True,
+                    alpha=0.5, color='blue', label='After 5 iters')
+
+    # After 10 iters (or final)
+    n_final = min(len(push_files), 10)
+    if n_final >= 6:
+        start = max(0, n_final - N)
+        ww = []
+        for f in push_files[start:n_final]:
+            w = np.load(f)
+            ww.append(w if w.ndim == 1 else w.mean(axis=0))
+        if len(ww) >= 2:
+            avg = np.diff(np.array(ww), axis=0).mean(axis=0)
+            ax.hist(avg, bins=100, range=(-0.15, 0.15), density=True,
+                    alpha=0.5, color='orange', label=f'After {n_final} iters')
+
+    ax.set_xlabel('Per-event weight change'); ax.set_ylabel('Density')
     ax.set_title(rf'Weight convergence ({TAG})'); ax.legend(); plt.tight_layout()
     plt.savefig(f'{flags.plot_dir}/weight_change_{TAG}.png', dpi=150)
     print(f"    weight_change_{TAG}.png"); plt.close()
@@ -634,21 +701,66 @@ def _make_2d_xsec_slices(TAG, truth_raw, mc_w, tilt, push):
         th, _ = np.histogram(true_p[m], bins=p_bins, weights=mc_w[m]*tilt[m])
         nh, _ = np.histogram(true_p[m], bins=p_bins, weights=mc_w[m])
         uh, _ = np.histogram(true_p[m], bins=p_bins, weights=mc_w[m]*push[m])
-        ax.step(p_bins, np.append(th/(bw*cw), (th/(bw*cw))[-1]), where='post', color='black', linewidth=2, label='Data Truth')
-        ax.errorbar(cen, uh/(bw*cw), fmt='o', color='red', markersize=4, capsize=2, label='OmniFold')
-        ax.step(p_bins, np.append(nh/(bw*cw), (nh/(bw*cw))[-1]), where='post', color='gray', linewidth=1, linestyle='--', label='Prior')
-        ax.set_title(f'{clo:.1f} < cos$\\theta$ < {chi:.1f}', fontsize=11); ax.set_xlabel('p [MeV/c]', fontsize=10)
+        # Statistical error on the unfolded result (sqrt of sum of w^2)
+        uh_w2, _ = np.histogram(true_p[m], bins=p_bins,
+                                weights=(mc_w[m]*push[m])**2)
+        uh_err = np.sqrt(np.maximum(uh_w2, 0))
+        scale = bw * cw
+        ax.step(p_bins, np.append(th/scale, (th/scale)[-1]), where='post',
+                color='black', linewidth=2, label='Data Truth')
+        ax.errorbar(cen, uh/scale, yerr=uh_err/scale, fmt='o', color='red',
+                    markersize=4, capsize=2, linewidth=1.2, label='OmniFold')
+        ax.step(p_bins, np.append(nh/scale, (nh/scale)[-1]), where='post',
+                color='gray', linewidth=1, linestyle='--', label='Prior')
+        ax.set_title(f'{clo:.1f} < cos$\\theta$ < {chi:.1f}', fontsize=11)
+        ax.set_xlabel('p [MeV/c]', fontsize=10)
         if si == 0: ax.legend(fontsize=8)
-    plt.suptitle(rf'SBND $\nu_e$ CC: $d^2\sigma / dp\, d\cos\theta$ ({TAG})', fontsize=14); plt.tight_layout()
+    plt.suptitle(rf'SBND $\nu_e$ CC: $d^2\sigma / dp\, d\cos\theta$ ({TAG})', fontsize=14)
+    plt.tight_layout()
     plt.savefig(f'{flags.plot_dir}/xsec_2d_slices_{TAG}.png', dpi=150)
     print(f"    xsec_2d_slices_{TAG}.png"); plt.close()
+
+    # ── Complementary: dσ/dcosθ in slices of momentum ────────────────────────
+    p_slices = [(200, 400), (400, 600), (600, 800), (800, 1000), (1000, 1400), (1400, 2000)]
+    cos_bins_2d = np.linspace(-1, 1, 11)
+    fig2, axes2 = plt.subplots(2, 3, figsize=(15, 8), squeeze=False)
+    for si, (plo, phi) in enumerate(p_slices):
+        ax = axes2[si//3][si%3]; m = (true_p >= plo) & (true_p < phi)
+        if m.sum() == 0: ax.set_visible(False); continue
+        bw = np.diff(cos_bins_2d); pw = phi - plo
+        cen = 0.5*(cos_bins_2d[:-1]+cos_bins_2d[1:])
+        th, _ = np.histogram(true_cos[m], bins=cos_bins_2d, weights=mc_w[m]*tilt[m])
+        nh, _ = np.histogram(true_cos[m], bins=cos_bins_2d, weights=mc_w[m])
+        uh, _ = np.histogram(true_cos[m], bins=cos_bins_2d, weights=mc_w[m]*push[m])
+        uh_w2, _ = np.histogram(true_cos[m], bins=cos_bins_2d,
+                                weights=(mc_w[m]*push[m])**2)
+        uh_err = np.sqrt(np.maximum(uh_w2, 0))
+        scale = bw * pw
+        ax.step(cos_bins_2d, np.append(th/scale, (th/scale)[-1]), where='post',
+                color='black', linewidth=2, label='Data Truth')
+        ax.errorbar(cen, uh/scale, yerr=uh_err/scale, fmt='o', color='red',
+                    markersize=4, capsize=2, linewidth=1.2, label='OmniFold')
+        ax.step(cos_bins_2d, np.append(nh/scale, (nh/scale)[-1]), where='post',
+                color='gray', linewidth=1, linestyle='--', label='Prior')
+        ax.set_title(f'{plo:.0f} < p < {phi:.0f} MeV/c', fontsize=11)
+        ax.set_xlabel(r'$\cos\theta_e$', fontsize=10)
+        if si == 0: ax.legend(fontsize=8)
+    plt.suptitle(rf'SBND $\nu_e$ CC: $d^2\sigma / d\cos\theta\, dp$ ({TAG})', fontsize=14)
+    plt.tight_layout()
+    plt.savefig(f'{flags.plot_dir}/xsec_2d_slices_costheta_{TAG}.png', dpi=150)
+    print(f"    xsec_2d_slices_costheta_{TAG}.png"); plt.close()
 
 
 def _make_2d_correlation(truth_raw, mc_w):
     true_p, true_cos = truth_raw[:, 0], truth_raw[:, 1]
-    p_bins = np.array([0, 500, 1000, 2000]); cos_bins = np.array([-1, 0, 0.5, 0.75, 1.0])
-    n_p, n_c = len(p_bins)-1, len(cos_bins)-1; n_2d = n_p * n_c; all_flat = []
-    for src in ['bnb', 'genie', 'mcstat']:
+    # Use analysis binning for finer granularity (7 p × 5 cosθ = 35 bins)
+    p_bins = np.array([0, 200, 400, 600, 800, 1000, 1400, 2000])
+    cos_bins = np.array([-1.0, -0.5, 0.0, 0.5, 0.75, 1.0])
+    n_p, n_c = len(p_bins)-1, len(cos_bins)-1
+    n_2d = n_p * n_c
+    all_flat = []
+    # Include all available systematic sources
+    for src in ['bnb', 'genie', 'extra_xsec', 'g4', 'mcstat']:
         pat = f'{flags.weights_base}/weights_{src}/{src}_univ*/Step2_Iter*_PushWeights.npy'
         files = sorted(glob.glob(pat)); ufiles = {}
         for f in files:
@@ -657,22 +769,55 @@ def _make_2d_correlation(truth_raw, mc_w):
                 uid = int(m.group(1)); it = iter_num(f)
                 if uid not in ufiles or it > ufiles[uid][0]: ufiles[uid] = (it, f)
         for uid in sorted(ufiles.keys()):
-            push = np.load(ufiles[uid][1]); push = push if push.ndim == 1 else push.mean(axis=0)
-            h, _, _ = np.histogram2d(true_cos, true_p, bins=[cos_bins, p_bins], weights=mc_w * push)
+            push = np.load(ufiles[uid][1])
+            push = push if push.ndim == 1 else push.mean(axis=0)
+            h, _, _ = np.histogram2d(true_cos, true_p, bins=[cos_bins, p_bins],
+                                      weights=mc_w * push)
             all_flat.append(h.flatten())
-    if len(all_flat) < 2: print("  Not enough universes for 2D correlation"); return
-    all_flat = np.array(all_flat); diff = all_flat - all_flat.mean(axis=0)
-    cov_2d = (diff.T @ diff) / len(all_flat); dg = np.sqrt(np.diag(cov_2d))
-    corr = cov_2d / np.outer(dg.clip(1e-10), dg.clip(1e-10))
-    bl = [f'c[{cos_bins[ic]:.1f},{cos_bins[ic+1]:.1f}]\np[{p_bins[ip]:.0f},{p_bins[ip+1]:.0f}]'
-          for ic in range(n_c) for ip in range(n_p)]
-    fig, ax = plt.subplots(figsize=(12, 10))
-    im = ax.pcolormesh(np.arange(n_2d+1), np.arange(n_2d+1), corr, vmin=-1, vmax=1, cmap='RdBu_r')
-    ax.set_xticks(np.arange(n_2d)+0.5); ax.set_xticklabels(bl, fontsize=7, rotation=90)
-    ax.set_yticks(np.arange(n_2d)+0.5); ax.set_yticklabels(bl, fontsize=7)
-    ax.set_title(r'Correlation: $(p, \cos\theta)$ 2D bins'); plt.colorbar(im, ax=ax); plt.tight_layout()
+    if len(all_flat) < 2:
+        print("  Not enough universes for 2D correlation"); return
+    all_flat = np.array(all_flat)
+    diff = all_flat - all_flat.mean(axis=0)
+    cov_2d = (diff.T @ diff) / len(all_flat)
+    dg = np.sqrt(np.diag(cov_2d))
+    # Mask empty bins (zero variance)
+    valid = dg > 1e-10
+    corr = np.zeros((n_2d, n_2d))
+    for i in range(n_2d):
+        for j in range(n_2d):
+            if valid[i] and valid[j]:
+                corr[i, j] = cov_2d[i, j] / (dg[i] * dg[j])
+            else:
+                corr[i, j] = np.nan
+
+    # Build labels: cosθ varies slowest (outer), p varies fastest (inner)
+    bl = []
+    for ic in range(n_c):
+        for ip in range(n_p):
+            cl = f'c[{cos_bins[ic]:.1f},{cos_bins[ic+1]:.1f}]'
+            pl = f'p[{p_bins[ip]:.0f},{p_bins[ip+1]:.0f}]'
+            bl.append(f'{cl}\n{pl}')
+
+    fig, ax = plt.subplots(figsize=(14, 12))
+    # Use masked array so NaN bins render as white
+    corr_masked = np.ma.masked_invalid(corr)
+    im = ax.pcolormesh(np.arange(n_2d+1), np.arange(n_2d+1), corr_masked,
+                        vmin=-1, vmax=1, cmap='RdBu_r')
+    ax.set_xticks(np.arange(n_2d)+0.5)
+    ax.set_xticklabels(bl, fontsize=5, rotation=90)
+    ax.set_yticks(np.arange(n_2d)+0.5)
+    ax.set_yticklabels(bl, fontsize=5)
+    # Draw cosθ block boundaries
+    for ic in range(1, n_c):
+        pos = ic * n_p
+        ax.axhline(pos, color='black', linewidth=0.5, alpha=0.5)
+        ax.axvline(pos, color='black', linewidth=0.5, alpha=0.5)
+    ax.set_title(r'Correlation: $(p, \cos\theta)$ 2D bins'
+                 f' ({n_p}×{n_c} = {n_2d} bins, {len(all_flat)} universes)')
+    plt.colorbar(im, ax=ax); plt.tight_layout()
     plt.savefig(f'{flags.plot_dir}/correlation_2d_p_costheta.png', dpi=150)
-    print(f"    correlation_2d_p_costheta.png"); plt.close()
+    print(f"    correlation_2d_p_costheta.png ({n_2d} bins from {len(all_flat)} universes)")
+    plt.close()
 
 
 if flags.action in ('validation', 'all'):

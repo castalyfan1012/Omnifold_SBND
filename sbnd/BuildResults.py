@@ -1,33 +1,46 @@
 """
 BuildResults.py — Build covariance matrices and extract cross-sections.
 
-Consolidates: BuildCovarianceMatrix, ExtractXsec.
-
 Actions:
   covariance   Build covariance matrices from systematic universes
   xsec         Extract differential cross-sections with uncertainty bands
 
-Key fix vs old BuildCovarianceMatrix.py:
-  When --source all, per-source covariance files (covariance_bnb_*.npz etc)
-  are now saved automatically — PlotAll.py uncertainty_budget needs them.
+Tag convention (derived from --tilted-var and --alpha in xsec action):
+  --tilted-var true_p --alpha 0.3  =>  tilt_p_alpha0.3
 
-Usage:
-    python3 sbnd/BuildResults.py covariance --source all --var true_p
-    python3 sbnd/BuildResults.py covariance --source ml  --var true_p
-    python3 sbnd/BuildResults.py xsec --var both
+Source groups for covariance:
+  all  = bnb + genie + extra_xsec + g4 + mcstat (+ ml)
+  fds  = mcstat + genie + extra_xsec  (stat+xsec, for fake-data studies)
+  stat = analytic diagonal MC stat only
+
+Examples:
+  python3 sbnd/BuildResults.py covariance --source all
+  python3 sbnd/BuildResults.py covariance --source fds
+  python3 sbnd/BuildResults.py covariance --source stat
+  python3 sbnd/BuildResults.py xsec --tilted-var true_p --alpha 0.3 --cov-source fds
 """
 
 import numpy as np
 import glob, re, os, argparse
 import matplotlib.pyplot as plt
 
+# Predefined source groups (Q7/Q12). A fake-data study should use 'fds' = stat+xsec.
+GROUP_MEMBERS = {
+    'all':  ['bnb', 'genie', 'extra_xsec', 'g4', 'mcstat'],
+    'fds':  ['mcstat', 'genie', 'extra_xsec'],   # stat + xsec
+    'xsec': ['genie', 'extra_xsec'],
+    'flux': ['bnb'],
+}
+SINGLE_SOURCES = ['bnb', 'genie', 'extra_xsec', 'g4', 'mcstat', 'ml', 'stat']
+
 parser = argparse.ArgumentParser()
 sub = parser.add_subparsers(dest='action', required=True)
 
 # ── covariance ────────────────────────────────────────────────────────────────
 p_cov = sub.add_parser('covariance')
-p_cov.add_argument('--source', choices=['bnb', 'genie', 'extra_xsec', 'g4', 'mcstat', 'ml', 'all'],
-                    default='all')
+p_cov.add_argument('--source',
+                   choices=SINGLE_SOURCES + list(GROUP_MEMBERS.keys()),
+                   default='all')
 p_cov.add_argument('--var', choices=['true_p', 'true_costheta', 'both'],
                     default='both')
 p_cov.add_argument('--data-dir', default='../FormattedData_SBND/')
@@ -58,7 +71,15 @@ p_xs.add_argument('--weights-base', default='sbnd')
 p_xs.add_argument('--export-dir', default='sbnd/exported_weights/')
 p_xs.add_argument('--plot-dir', default='sbnd/plots_xsec/')
 p_xs.add_argument('--cov-dir', default='sbnd/covariance/')
-p_xs.add_argument('--tag', default='tilt_alpha0.5')
+p_xs.add_argument('--cov-source', default='all',
+                  help="Which combined covariance to use: 'all', 'fds' (stat+xsec), etc. "
+                       "For fake-data studies use 'fds'.")
+p_xs.add_argument('--tag', default=None,
+                  help="Override tag. If omitted, derived from --tilted-var and --alpha.")
+p_xs.add_argument('--tilted-var', choices=['true_p', 'true_costheta', 'both'],
+                  default='true_p', help='Which variable was tilted (for tag derivation).')
+p_xs.add_argument('--alpha', type=float, default=0.3,
+                  help='Tilt strength (for tag derivation).')
 
 flags = parser.parse_args()
 
@@ -73,10 +94,34 @@ XLABEL = {
     'true_p':        r'True electron momentum [MeV/c]',
     'true_costheta': r'True $\cos\theta_e$',
 }
+TILT_SHORT = {'true_p': 'p', 'true_costheta': 'costheta', 'both': 'both'}
+
+
+def make_fdt_tag(var, alpha):
+    return f'tilt_{TILT_SHORT[var]}_alpha{alpha}'
 
 def iter_num(p):
     m = re.search(r'Iter(\d+)', p)
     return int(m.group(1)) if m else -1
+
+
+def chi2_pvalue(chi2, ndf):
+    """Survival function of the chi2 distribution (scipy, with a safe fallback)."""
+    if ndf is None or ndf <= 0 or not np.isfinite(chi2):
+        return float('nan')
+    try:
+        from scipy import stats
+        return float(stats.chi2.sf(chi2, ndf))
+    except Exception:
+        import math
+        k, x = float(ndf), float(chi2)
+        t = ((x / k) ** (1.0 / 3.0) - (1.0 - 2.0 / (9.0 * k))) / math.sqrt(2.0 / (9.0 * k))
+        return float(0.5 * math.erfc(t / math.sqrt(2.0)))
+
+
+def fit_annotation(chi2, ndf):
+    p = chi2_pvalue(chi2, ndf)
+    return rf'$\chi^2$/ndf = {chi2:.2f}/{ndf} = {chi2/ndf:.2f},  p = {p:.3f}'
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -98,20 +143,56 @@ def build_covariance_single_var(var_name):
     cov_dir = flags.cov_dir
     os.makedirs(cov_dir, exist_ok=True)
 
+    # ── Analytic MC-statistical covariance (diagonal, Σw²) — always saved ──────
+    # Provides an honest statistical component even without bootstrap 'mcstat'
+    # universes, and is used as a fallback in the 'fds' group.
+    stat_var = np.zeros(n_bins)
+    for i in range(n_bins):
+        m = (var_vals >= bins[i]) & (var_vals < bins[i + 1])
+        stat_var[i] = np.sum(mc_weights[m] ** 2)
+    stat_cov = np.diag(stat_var)
+    stat_frac = np.zeros_like(stat_cov)
+    for i in range(n_bins):
+        if nom_hist[i] > 0:
+            stat_frac[i, i] = stat_var[i] / (nom_hist[i] ** 2)
+    np.savez(f'{cov_dir}/covariance_stat_{var_name}.npz',
+             cov=stat_cov, frac_cov=stat_frac, bins=bins,
+             mean_hist=nom_hist, nom_hist=nom_hist,
+             all_hists=nom_hist[np.newaxis, :], n_universes=np.array(1))
+    print(f"  Analytic MC-stat covariance saved: covariance_stat_{var_name}.npz "
+          f"(mean frac stat unc = {np.sqrt(np.diag(stat_frac)).mean():.4f})")
+
+    if flags.source == 'stat':
+        print(f"  --source stat: only the analytic MC-stat covariance was requested.")
+        return
+
     # ── Determine sources ─────────────────────────────────────────────────────
-    if flags.source == 'all':
-        sources = ['bnb', 'genie', 'extra_xsec', 'g4', 'mcstat']
-        sources = [s for s in sources
-                   if glob.glob(f'{flags.weights_base}/weights_{s}/{s}_univ*/Step2_Iter*_PushWeights.npy')]
-        ml_dirs = sorted(glob.glob(flags.ml_weights_dir + 'replica_*/'))
-        if ml_dirs:
-            sources.append('ml')
+    def _universe_exists(s):
+        return bool(glob.glob(
+            f'{flags.weights_base}/weights_{s}/{s}_univ*/Step2_Iter*_PushWeights.npy'))
+
+    ml_dirs = []
+    add_analytic_stat = False   # for 'fds' when bootstrap mcstat is unavailable
+
+    if flags.source in GROUP_MEMBERS:
+        requested = GROUP_MEMBERS[flags.source]
+        sources = [s for s in requested if _universe_exists(s)]
+        missing = [s for s in requested if not _universe_exists(s)]
+        if missing:
+            print(f"  NOTE: no universes found for {missing} (skipped for '{flags.source}')")
+        if flags.source == 'all':
+            ml_dirs = sorted(glob.glob(flags.ml_weights_dir + 'replica_*/'))
+            if ml_dirs:
+                sources.append('ml')
+        if flags.source == 'fds' and 'mcstat' not in sources:
+            add_analytic_stat = True
+            print(f"  'fds' group: bootstrap 'mcstat' unavailable -> using analytic "
+                  f"MC-stat covariance for the statistical component.")
     elif flags.source == 'ml':
         sources = ['ml']
         ml_dirs = sorted(glob.glob(flags.ml_weights_dir + 'replica_*/'))
     else:
         sources = [flags.source]
-        ml_dirs = []
 
     # ── Collect per-source ────────────────────────────────────────────────────
     all_hists = []
@@ -124,15 +205,22 @@ def build_covariance_single_var(var_name):
         if src == 'ml':
             print(f"ml: {len(ml_dirs)} replicas found")
             all_univ_dirs_by_source['ml'] = ml_dirs
+            stale_ml = 0
             for rdir in ml_dirs:
                 pf = sorted(glob.glob(rdir + 'Step2_Iter*_PushWeights.npy'), key=iter_num)
                 if not pf:
                     continue
                 push = np.load(pf[-1])
                 push = push if push.ndim == 1 else push.mean(axis=0)
+                if push.shape[0] != mc_weights.shape[0]:
+                    stale_ml += 1; continue
                 h, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * push)
                 all_hists.append(h)
                 src_hists.append(h)
+            if stale_ml:
+                print(f"  WARNING: {stale_ml} ML replicas skipped (stale — trained on "
+                      f"{push.shape[0]} events, current sample has {mc_weights.shape[0]}). "
+                      f"Rerun: python3 sbnd/RunStudies.py run-ml-unc --var <var> --alpha <alpha>")
         else:
             pattern = f'{flags.weights_base}/weights_{src}/{src}_univ*/Step2_Iter*_PushWeights.npy'
             pfiles = sorted(glob.glob(pattern))
@@ -147,27 +235,32 @@ def build_covariance_single_var(var_name):
             print(f"{src}: {len(univ_files)} universes found")
             udirs = sorted(glob.glob(f'{flags.weights_base}/weights_{src}/{src}_univ*/'))
             all_univ_dirs_by_source[src] = udirs
+            stale_syst = 0
             for uid in sorted(univ_files.keys()):
                 push = np.load(univ_files[uid][1])
                 push = push if push.ndim == 1 else push.mean(axis=0)
+                if push.shape[0] != mc_weights.shape[0]:
+                    stale_syst += 1; continue
                 h, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * push)
                 all_hists.append(h)
                 src_hists.append(h)
+            if stale_syst:
+                print(f"  WARNING: {stale_syst}/{len(univ_files)} {src} universes skipped "
+                      f"(stale — trained on old sample). "
+                      f"Rerun: python3 sbnd/RunStudies.py run-syst --source {src}")
 
         hists_by_source[src] = np.array(src_hists) if src_hists else np.array([])
 
     all_hists = np.array(all_hists)
     n_univ = len(all_hists)
     print(f"Total universes ({var_name}): {n_univ}")
-    if n_univ == 0:
+    if n_univ == 0 and not add_analytic_stat:
         print("ERROR: No universe results found."); return
 
     # ── Per-source covariance computation ────────────────────────────────────
-    # Compute each source's covariance independently, then sum for the total.
-    # This allows --ml-as-stderr to scale ML by 1/N_replicas.
-    freeze_ml = getattr(flags, 'freeze_ml', False)
+    freeze_ml    = getattr(flags, 'freeze_ml', False)
     ml_as_stderr = getattr(flags, 'ml_as_stderr', False)
-    ml_label  = getattr(flags, 'ml_label', None)
+    ml_label     = getattr(flags, 'ml_label', None)
 
     cov_per_source = {}   # src -> (cov_matrix, mean_hist, n_universes)
 
@@ -175,7 +268,6 @@ def build_covariance_single_var(var_name):
         if len(src_arr) < 2:
             continue
 
-        # --freeze-ml: load from disk instead of recomputing
         standard_path = f'{cov_dir}/covariance_{src}_{var_name}.npz'
         if src == 'ml' and freeze_ml and os.path.exists(standard_path):
             print(f"  --freeze-ml: loading existing {standard_path}")
@@ -188,7 +280,6 @@ def build_covariance_single_var(var_name):
         sd = src_arr - sm[np.newaxis, :]
         sc = (sd.T @ sd) / len(src_arr)
 
-        # Save per-source file (always the single-replica spread = std)
         sf = np.zeros_like(sc)
         for i in range(n_bins):
             for j in range(n_bins):
@@ -200,13 +291,13 @@ def build_covariance_single_var(var_name):
                        mean_hist=sm, nom_hist=nom_hist, all_hists=src_arr,
                        n_universes=np.array(len(src_arr)))
 
-        if flags.source == 'all' or flags.source == src:
-            np.savez(standard_path, **payload)
-            print(f"  Per-source saved: covariance_{src}_{var_name}.npz "
-                  f"({len(src_arr)} universes)")
+        # Always persist per-source files (needed by the uncertainty budget /
+        # per-source correlation breakdowns in MakePlots).
+        np.savez(standard_path, **payload)
+        print(f"  Per-source saved: covariance_{src}_{var_name}.npz "
+              f"({len(src_arr)} universes)")
 
-        # For ML: also write a labelled snapshot
-        if src == 'ml' and flags.source in ('all', 'ml'):
+        if src == 'ml':
             label = ml_label or f"{len(src_arr)}rep"
             snapshot_path = f'{cov_dir}/covariance_ml_{label}_{var_name}.npz'
             np.savez(snapshot_path, **payload)
@@ -218,8 +309,6 @@ def build_covariance_single_var(var_name):
     cov = np.zeros((n_bins, n_bins))
     for src, (sc, sm, n_u) in cov_per_source.items():
         if src == 'ml' and ml_as_stderr:
-            # Standard error: Cov_ML / N_replicas
-            # (appropriate when final result averages all replicas)
             cov += sc / n_u
             print(f"  ML covariance scaled by 1/{n_u} (--ml-as-stderr): "
                   f"√diag goes from {np.sqrt(np.diag(sc)).mean():.1f} "
@@ -227,7 +316,16 @@ def build_covariance_single_var(var_name):
         else:
             cov += sc
 
-    mean_hist = all_hists.mean(axis=0)
+    if add_analytic_stat:
+        cov += stat_cov
+        cov_per_source['stat'] = (stat_cov, nom_hist, 1)
+        print(f"  Added analytic MC-stat covariance to the total (fds).")
+
+    if n_univ > 0:
+        mean_hist = all_hists.mean(axis=0)
+    else:
+        mean_hist = nom_hist   # pure analytic-stat total
+
     frac_cov = np.zeros_like(cov)
     for i in range(n_bins):
         for j in range(n_bins):
@@ -240,8 +338,12 @@ def build_covariance_single_var(var_name):
     # ── Save combined ─────────────────────────────────────────────────────────
     np.savez(f'{cov_dir}/covariance_{flags.source}_{var_name}.npz',
              cov=cov, frac_cov=frac_cov, bins=bins,
-             mean_hist=mean_hist, nom_hist=nom_hist, all_hists=all_hists,
-             ml_as_stderr=np.array(ml_as_stderr))
+             mean_hist=mean_hist, nom_hist=nom_hist,
+             all_hists=all_hists if n_univ > 0 else mean_hist[np.newaxis, :],
+             ml_as_stderr=np.array(ml_as_stderr),
+             sources=np.array(list(cov_per_source.keys())))
+    print(f"  Combined saved: covariance_{flags.source}_{var_name}.npz "
+          f"(sources: {list(cov_per_source.keys())})")
 
     # ── Print table ───────────────────────────────────────────────────────────
     print(f"\n{'Bin center':>10s} {'Nominal':>10s} {'Mean':>10s} "
@@ -251,63 +353,12 @@ def build_covariance_single_var(var_name):
               f"{diag_unc[i]:10.2f} {frac_unc[i]:10.4f}")
 
     # ── Plot 1: Covariance matrices ───────────────────────────────────────────
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    im0 = axes[0].imshow(cov, origin='lower', aspect='auto',
-                          extent=[bins[0], bins[-1], bins[0], bins[-1]])
-    axes[0].set_title(f'Covariance ({flags.source})')
-    axes[0].set_xlabel(xlabel); axes[0].set_ylabel(xlabel)
-    plt.colorbar(im0, ax=axes[0])
-    vmax = max(abs(frac_cov.min()), abs(frac_cov.max()), 0.01)
-    im1 = axes[1].imshow(frac_cov, origin='lower', aspect='auto',
-                          extent=[bins[0], bins[-1], bins[0], bins[-1]],
-                          vmin=-vmax, vmax=vmax, cmap='RdBu_r')
-    axes[1].set_title(f'Fractional covariance ({flags.source})')
-    axes[1].set_xlabel(xlabel); axes[1].set_ylabel(xlabel)
-    plt.colorbar(im1, ax=axes[1])
-    plt.tight_layout()
-    plt.savefig(f'{flags.plot_dir}/cov_matrix_{flags.source}_{var_name}.png', dpi=150)
-    plt.close()
+    # ── Universe spread and stability (terminal only, no plot) ───────────────
+    if n_univ == 0:
+        print(f"  (No universe spread / chi2-vs-iter for analytic-only total.)")
+        return
 
-    # ── Plot 2: Unfolded spectrum with systematic band ────────────────────────
-    fig2, axes2 = plt.subplots(2, 1, figsize=(8, 7), sharex=True,
-                                gridspec_kw={'height_ratios': [3, 1]})
-    axes2[0].step(bins, np.append(nom_hist, nom_hist[-1]),
-                  where='post', color='blue', linewidth=1.5, label='Nominal MC')
-    axes2[0].step(bins, np.append(mean_hist, mean_hist[-1]),
-                  where='post', color='red', linewidth=1.5, label=f'Mean ({flags.source})')
-    for i in range(n_bins):
-        axes2[0].fill_between([bins[i], bins[i+1]],
-                               mean_hist[i]-diag_unc[i], mean_hist[i]+diag_unc[i],
-                               color='red', alpha=0.2,
-                               label=(r'$\pm 1\sigma$' if i == 0 else None))
-    axes2[0].set_ylabel('Unfolded weighted events'); axes2[0].legend(fontsize=10)
-    axes2[0].set_title(f'OmniFold unfolded: {var_name} ({flags.source})')
-    axes2[1].step(bins, np.append(frac_unc, frac_unc[-1]),
-                  where='post', color='red', linewidth=1.5)
-    for i in range(n_bins):
-        axes2[1].fill_between([bins[i], bins[i+1]], 0, frac_unc[i], color='red', alpha=0.2)
-    axes2[1].set_xlabel(xlabel); axes2[1].set_ylabel('Frac. unc.')
-    axes2[1].set_ylim(0, max(frac_unc) * 1.5)
-    plt.tight_layout()
-    plt.savefig(f'{flags.plot_dir}/unfolded_with_unc_{flags.source}_{var_name}.png', dpi=150)
-    plt.close()
-
-    # ── Plot 3: Universe spread (spaghetti) ───────────────────────────────────
-    fig3, ax3 = plt.subplots(figsize=(8, 5))
-    for i in range(min(n_univ, 50)):
-        ax3.step(bins, np.append(all_hists[i], all_hists[i][-1]),
-                 where='post', color='gray', alpha=0.15, linewidth=0.5)
-    ax3.step(bins, np.append(nom_hist, nom_hist[-1]),
-             where='post', color='blue', linewidth=2, label='Nominal')
-    ax3.step(bins, np.append(mean_hist, mean_hist[-1]),
-             where='post', color='red', linewidth=2, linestyle='--', label='Mean')
-    ax3.set_xlabel(xlabel); ax3.set_ylabel('Unfolded weighted events')
-    ax3.set_title(f'Universe spread: {var_name} ({flags.source}, {n_univ} univ)')
-    ax3.legend(); plt.tight_layout()
-    plt.savefig(f'{flags.plot_dir}/universe_spread_{flags.source}_{var_name}.png', dpi=150)
-    plt.close()
-
-    # ── Plot 4: Chi2 vs iteration ─────────────────────────────────────────────
+    # ── Plot 4: Chi2 vs iteration (systematic stability diagnostic) ───────────
     all_udirs = []
     for src in sources:
         all_udirs.extend(all_univ_dirs_by_source.get(src, []))
@@ -324,15 +375,20 @@ def build_covariance_single_var(var_name):
     paper_iters = [0]
     paper_chi2  = [float('nan')]
 
-    # Prior chi2
     hists_i0 = []
+    stale_count = 0
     for udir in all_udirs:
         pf = glob.glob(udir + 'Step2_Iter0_*_PushWeights.npy')
         if not pf: continue
         push = np.load(pf[0])
         push = push if push.ndim == 1 else push.mean(axis=0)
+        if push.shape[0] != mc_weights.shape[0]:
+            stale_count += 1; continue
         h, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * push)
         hists_i0.append(h)
+    if stale_count:
+        print(f"  WARNING: {stale_count} universe dirs skipped in stability chi2 "
+              f"(stale weights — rerun run-syst)")
     if len(hists_i0) >= 2:
         arr0 = np.array(hists_i0)
         d0 = arr0 - arr0.mean(axis=0)
@@ -350,6 +406,8 @@ def build_covariance_single_var(var_name):
             if not pf: continue
             push = np.load(pf[0])
             push = push if push.ndim == 1 else push.mean(axis=0)
+            if push.shape[0] != mc_weights.shape[0]:
+                continue
             h, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * push)
             hists_it.append(h)
         if len(hists_it) < 2:
@@ -365,28 +423,15 @@ def build_covariance_single_var(var_name):
         paper_iters.append(it + 1); paper_chi2.append(c2)
 
     print(f"\n  Systematic stability chi2 ({var_name}):")
-    print(f"  Measures: (universe_mean - nominal)^T C^-1 (universe_mean - nominal)")
-    print(f"  Interpretation: how much the systematic universes SHIFT the result vs nominal.")
-    print(f"  Small (~0.05) and flat = good: systematics are stable across OmniFold iterations.")
-    print(f"  This is NOT the fake-data recovery chi2 (see MakePlots.py validation for that).")
-    print(f"  {'Iter':>5s} {'chi2':>10s}  note")
+    print(f"  {'Iter':>5s} {'chi2':>10s} {'p-value':>9s}  note")
     for pi, c2 in zip(paper_iters, paper_chi2):
-        s = f"{c2:10.2f}" if not np.isnan(c2) else "       N/A"
+        if np.isnan(c2):
+            s, ps = "       N/A", "      N/A"
+        else:
+            s  = f"{c2:10.2f}"
+            ps = f"{chi2_pvalue(c2, ndf):9.3f}"
         note = "(prior, no unfolding)" if pi == 0 else ""
-        print(f"  {pi:5d} {s}  {note}")
-
-    fig4, ax4 = plt.subplots(figsize=(8, 5))
-    valid = [(pi, c2) for pi, c2 in zip(paper_iters, paper_chi2) if not np.isnan(c2)]
-    if valid:
-        vi, vc = zip(*valid)
-        ax4.plot(vi, vc, 'ro-', linewidth=2, markersize=6)
-    ax4.set_xlabel('OmniFold Iteration'); ax4.set_ylabel(r'$\chi^2$')
-    ax4.set_title(f'Systematic stability: {var_name} ({flags.source})')
-    plt.tight_layout()
-    plt.savefig(f'{flags.plot_dir}/syst_chi2_vs_iter_{flags.source}_{var_name}.png', dpi=150)
-    plt.close()
-
-    print(f"  Plots saved to {flags.plot_dir}/")
+        print(f"  {pi:5d} {s} {ps}  {note}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -415,40 +460,44 @@ def extract_xsec_single_var(var_name):
 
     os.makedirs(flags.plot_dir, exist_ok=True)
 
+    xsec_tag = flags.tag or make_fdt_tag(flags.tilted_var, flags.alpha)
+
     print(f"\n{'='*60}")
-    print(f"Cross-section extraction: {var_name}")
+    print(f"Cross-section extraction: {var_name}  (cov-source={flags.cov_source})")
     print(f"{'='*60}")
 
-    # Efficiency
     eff_file = flags.export_dir + f'efficiency_{var_name}.npy'
     eff = np.load(eff_file) if os.path.exists(eff_file) else np.ones(n_bins)
 
-    # Nominal
     N_nom, _ = np.histogram(var_vals, bins=bins, weights=mc_weights)
     xsec_nom = N_nom / (eff.clip(1e-6) * bin_widths * NORM)
 
-    # OmniFold push weights
-    tilt_dir = f'weights_sbnd_fakedata_{flags.tag}/'
+    tilt_dir = f'weights_sbnd_fakedata_{xsec_tag}/'
     push_files = sorted(glob.glob(tilt_dir + 'Step2_Iter*_PushWeights.npy'), key=iter_num)
     has_unf = bool(push_files)
     if has_unf:
         push = np.load(push_files[-1])
         push = push if push.ndim == 1 else push.mean(axis=0)
-        N_unf, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * push)
-        xsec_unf = N_unf / (eff.clip(1e-6) * bin_widths * NORM)
+        if push.shape[0] != mc_weights.shape[0]:
+            print(f"  ERROR: push weights have {push.shape[0]} events but current sample "
+                  f"has {mc_weights.shape[0]}. Retrain the fake-data OmniFold run.")
+            has_unf = False
+            xsec_unf = xsec_nom
+        else:
+            N_unf, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * push)
+            xsec_unf = N_unf / (eff.clip(1e-6) * bin_widths * NORM)
     else:
         xsec_unf = xsec_nom
 
-    # Data Truth
-    tilt_file = flags.data_dir + f'truth_weights_sbnd_fakedata_{flags.tag}.npy'
+    tilt_file = flags.data_dir + f'truth_weights_sbnd_fakedata_{xsec_tag}.npy'
     has_truth = os.path.exists(tilt_file)
     if has_truth:
         tilt = np.load(tilt_file)
         N_truth, _ = np.histogram(var_vals, bins=bins, weights=mc_weights * tilt)
         xsec_truth = N_truth / (eff.clip(1e-6) * bin_widths * NORM)
 
-    # Systematic covariance
-    cov_file = getattr(flags, 'cov_dir', 'sbnd/covariance/') + f'/covariance_all_{var_name}.npz'
+    cov_file = getattr(flags, 'cov_dir', 'sbnd/covariance/') + \
+        f'/covariance_{flags.cov_source}_{var_name}.npz'
     has_syst = os.path.exists(cov_file)
     if has_syst:
         cd = np.load(cov_file)
@@ -456,9 +505,26 @@ def extract_xsec_single_var(var_name):
         cov_xsec = cd['cov'] / np.outer(scale, scale)
         xsec_unc = np.sqrt(np.diag(cov_xsec))
     else:
-        xsec_unc = np.zeros(n_bins)
+        print(f"  WARNING: {cov_file} not found — build it with "
+              f"'covariance --source {flags.cov_source}'")
+        xsec_unc = np.zeros(n_bins); cov_xsec = None
 
-    # ── Plot: xsec with syst band ────────────────────────────────────────────
+    # ── Goodness of fit (stat cov for chi2 — see MakePlots validation for same reason) ─
+    if has_unf and has_truth:
+        d = xsec_unf - xsec_truth
+        # Use diagonal stat covariance for the chi2 (the correlated systematic cov
+        # is centered on nominal, not on the fake-data result)
+        unf_w2, _ = np.histogram(var_vals, bins=bins, weights=(mc_weights * push) ** 2)
+        stat_diag_xsec = unf_w2 / (eff.clip(1e-6) * bin_widths * NORM) ** 2
+        c2 = float(np.sum(d ** 2 / stat_diag_xsec.clip(1e-30)))
+        ndf = n_bins - 1
+        p = chi2_pvalue(c2, ndf)
+        gof = fit_annotation(c2, ndf)
+        print(f"  Xsec vs tilted truth (stat cov): {gof}")
+    else:
+        gof = None
+
+    # ── Plot: xsec + frac unc subplot ─────────────────────────────────────────
     fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True,
                               gridspec_kw={'height_ratios': [3, 1]})
     axes[0].step(bins, np.append(xsec_nom, xsec_nom[-1]),
@@ -466,14 +532,18 @@ def extract_xsec_single_var(var_name):
                  label='Nominal MC (prior)')
     if has_truth:
         axes[0].step(bins, np.append(xsec_truth, xsec_truth[-1]),
-                     where='post', color='black', linewidth=2, label='Data Truth')
+                     where='post', color='black', linewidth=2, label='Tilted data')
     if has_unf:
         axes[0].errorbar(centers, xsec_unf, yerr=xsec_unc if has_syst else None,
                          fmt='ro', markersize=5, capsize=3, linewidth=1.5,
                          label='OmniFold')
-    axes[0].set_ylabel(ylabel); axes[0].legend(fontsize=10)
+    axes[0].set_ylabel(ylabel); axes[0].legend(loc='best', fontsize=10)
     axes[0].set_title(rf'SBND $\nu_e$ CC: {var_name}')
     axes[0].ticklabel_format(axis='y', style='sci', scilimits=(-2, 2))
+    if gof:
+        axes[0].text(0.03, 0.97, gof, transform=axes[0].transAxes,
+                     va='top', ha='left', fontsize=9,
+                     bbox=dict(boxstyle='round', fc='white', ec='none', alpha=0.8))
 
     xsec_mean = (np.load(cov_file)['mean_hist'] / (eff.clip(1e-6) * bin_widths * NORM)
                  if has_syst else xsec_nom)
@@ -490,43 +560,13 @@ def extract_xsec_single_var(var_name):
     plt.savefig(f'{flags.plot_dir}/xsec_{var_name}.png', dpi=150)
     print(f"  Saved xsec_{var_name}.png"); plt.close()
 
-    # ── Efficiency plot ──────────────────────────────────────────────────────
-    fig2, ax2 = plt.subplots(figsize=(7, 4))
-    ax2.step(bins, np.append(eff, eff[-1]), where='post', color='black', linewidth=2)
-    for i in range(n_bins):
-        ax2.fill_between([bins[i], bins[i+1]], 0, eff[i], color='steelblue', alpha=0.3)
-    ax2.set_xlabel(xlabel); ax2.set_ylabel('Selection efficiency')
-    ax2.set_ylim(0, 1); ax2.set_title(f'Efficiency: {var_name}')
-    plt.tight_layout()
-    plt.savefig(f'{flags.plot_dir}/efficiency_{var_name}.png', dpi=150)
-    print(f"  Saved efficiency_{var_name}.png"); plt.close()
-
-    # ── Ratio to truth ───────────────────────────────────────────────────────
-    if has_unf and has_truth:
-        fig3, ax3 = plt.subplots(figsize=(7, 4))
-        ratio = xsec_unf / np.where(xsec_truth > 0, xsec_truth, 1)
-        ratio_unc = xsec_unc / np.where(xsec_truth > 0, xsec_truth, 1)
-        ratio_nom = xsec_nom / np.where(xsec_truth > 0, xsec_truth, 1)
-        for i in range(n_bins):
-            ax3.fill_between([bins[i], bins[i+1]],
-                              ratio_nom[i]-0.02, ratio_nom[i]+0.02,
-                              color='gray', alpha=0.3,
-                              label=('Prior' if i == 0 else None))
-        ax3.errorbar(centers, ratio, yerr=ratio_unc,
-                     fmt='ro', markersize=5, capsize=3, linewidth=1.5,
-                     label='OmniFold')
-        ax3.axhline(1.0, color='black', linewidth=1)
-        ax3.set_xlabel(xlabel); ax3.set_ylabel('Ratio to Data Truth')
-        ax3.legend(); ax3.set_xlim(bins[0], bins[-1])
-        plt.tight_layout()
-        plt.savefig(f'{flags.plot_dir}/ratio_to_truth_{var_name}.png', dpi=150)
-        print(f"  Saved ratio_to_truth_{var_name}.png"); plt.close()
-
-    # Print table
+    # ── Print cross-section table ─────────────────────────────────────────────
+    bfmt = '.0f' if var_name == 'true_p' else '.2f'
     print(f"\n  {'Bin':>14s} {'Nominal':>12s} {'OmniFold':>12s} "
           f"{'Syst unc':>12s} {'Frac unc':>10s}")
     for i in range(n_bins):
-        print(f"  [{bins[i]:6.0f},{bins[i+1]:6.0f}] {xsec_nom[i]:12.4e} "
+        lo = f"{bins[i]:{bfmt}}"; hi = f"{bins[i+1]:{bfmt}}"
+        print(f"  [{lo:>6s},{hi:>6s}] {xsec_nom[i]:12.4e} "
               f"{xsec_unf[i]:12.4e} {xsec_unc[i]:12.4e} {frac_unc[i]:10.4f}")
 
 
@@ -544,6 +584,8 @@ elif flags.action == 'xsec':
         flags.export_dir = 'sbnd/exported_weights/'
     if not hasattr(flags, 'tag'):
         flags.tag = 'tilt_alpha0.5'
+    if not hasattr(flags, 'cov_source'):
+        flags.cov_source = 'all'
     vars_to_run = (['true_p', 'true_costheta'] if flags.var == 'both'
                    else [flags.var])
     for v in vars_to_run:

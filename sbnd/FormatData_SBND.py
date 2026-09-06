@@ -1,5 +1,16 @@
 """
 FormatData_SBND.py
+
+Converts the selected nueCC signal events into the .npy inputs OmniFold needs,
+computes the per-bin selection efficiency, and (NEW) flags low-efficiency bins.
+
+CHANGE LOG (this revision)
+--------------------------
+* Q9 (low-momentum / efficiency): a per-variable reliability MASK is now saved
+  next to each efficiency file. Any analysis bin whose efficiency falls below
+  EFF_THRESHOLD is flagged as unreliable so downstream scripts (and the reader)
+  can optionally drop or de-weight it. This makes the "minimum efficiency
+  threshold" discussion concrete and reproducible instead of eyeballed.
 """
 import numpy as np
 import pandas as pd
@@ -11,6 +22,10 @@ OUTPUT_DIR  = '../FormattedData_SBND/'
 FINAL_STAGE = 'sel_vertex_distance'
 RECO_VARS   = ['reco_ke', 'reco_costheta', 'reco_p']
 TRUTH_VARS  = ['true_ke', 'true_costheta', 'true_p']
+
+# Bins whose selection efficiency is below this fraction are flagged unreliable.
+# The [0,200] MeV/c momentum bin (~9% efficiency, slide 13) is the motivating case.
+EFF_THRESHOLD = 0.10
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -90,7 +105,7 @@ for i, v in enumerate(TRUTH_VARS):
     print(f"  truth {v:20s}: {np.nanmin(truth_raw[:,i]):.2f} -- {np.nanmax(truth_raw[:,i]):.2f}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Per-bin efficiency diagnostic
+# Per-bin efficiency diagnostic (+ reliability mask)
 # ═══════════════════════════════════════════════════════════════════════════════
 # Efficiency = N_selected_signal / N_all_signal_in_sample
 # Denominator is all is_sig events in sel_topo (passed through quality cuts but
@@ -99,7 +114,7 @@ for i, v in enumerate(TRUTH_VARS):
 # For the full efficiency (including reco+quality), the pre-selection evtdf
 # would be needed.
 print(f"\n{'='*60}")
-print(f"Per-bin efficiency diagnostic")
+print(f"Per-bin efficiency diagnostic (threshold = {EFF_THRESHOLD:.0%})")
 print(f"{'='*60}")
 
 all_signal = sel_topo[sel_topo['is_sig']].copy()
@@ -128,14 +143,30 @@ for var_name, bins in BINNING_EFF.items():
 
     np.save(OUTPUT_DIR + f'efficiency_{var_name}.npy', eff)
 
+    # NEW: reliability mask — True where efficiency is trustworthy.
+    reliable = eff >= EFF_THRESHOLD
+    np.save(OUTPUT_DIR + f'efficiency_mask_{var_name}.npy', reliable)
+
     print(f"\n  {var_name}:")
     fmt = '.0f' if var_name == 'true_p' else '.2f'
-    print(f"  {'Bin':>20s}  {'N_gen':>8s}  {'N_sel':>8s}  {'Eff':>8s}")
+    print(f"  {'Bin':>20s}  {'N_gen':>8s}  {'N_sel':>8s}  {'Eff':>8s}  {'Reliable':>9s}")
     for i in range(n_bins):
         lo, hi = bins[i], bins[i+1]
-        print(f"  [{lo:{fmt}},{hi:{fmt}})  {N_gen[i]:8d}  {N_sel[i]:8d}  {eff[i]:8.4f}")
+        flag = 'yes' if reliable[i] else 'NO (<thr)'
+        print(f"  [{lo:{fmt}},{hi:{fmt}})  {N_gen[i]:8d}  {N_sel[i]:8d}  "
+              f"{eff[i]:8.4f}  {flag:>9s}")
     print(f"  Saved: {OUTPUT_DIR}efficiency_{var_name}.npy")
+    print(f"  Saved: {OUTPUT_DIR}efficiency_mask_{var_name}.npy  "
+          f"({reliable.sum()}/{n_bins} bins reliable)")
+
+    low = [i for i in range(n_bins) if not reliable[i]]
+    if low:
+        low_str = ", ".join(f"[{bins[i]:{fmt}},{bins[i+1]:{fmt}}) eff={eff[i]:.3f}"
+                            for i in low)
+        print(f"  ** LOW-EFFICIENCY BINS FLAGGED (< {EFF_THRESHOLD:.0%}): {low_str}")
 
 print(f"\nNote: This efficiency is PARTIAL — it measures the {FINAL_STAGE}")
 print(f"cut acceptance on top of earlier selection stages. To get the full")
 print(f"efficiency, rerun with the pre-selection evtdf as input.")
+print(f"\nReliability masks let BuildResults/MakePlots optionally exclude bins")
+print(f"below {EFF_THRESHOLD:.0%} efficiency (see --drop-unreliable there).")

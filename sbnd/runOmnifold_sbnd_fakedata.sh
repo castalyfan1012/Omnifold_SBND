@@ -1,11 +1,14 @@
 #!/bin/bash
 # Usage (run from Omnifold_SBND/ directory):
-#   nohup bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.3     > fd03.log 2>&1 &
-#   nohup bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.5     > fd05.log 2>&1 &
-#   nohup bash sbnd/runOmnifold_sbnd_fakedata.sh tilt_alpha0.3 20  > fd03_n20.log 2>&1 &
+#   nohup bash sbnd/runOmnifold_sbnd_fakedata.sh --var true_p --alpha 0.3        > fdt_p_03.log 2>&1 &
+#   nohup bash sbnd/runOmnifold_sbnd_fakedata.sh --var true_costheta --alpha 0.3 > fdt_costheta_03.log 2>&1 &
+#   nohup bash sbnd/runOmnifold_sbnd_fakedata.sh --var both --alpha 0.3          > fdt_both_03.log 2>&1 &
+#   nohup bash sbnd/runOmnifold_sbnd_fakedata.sh --var true_p --alpha 0.3 --niter 20 > fdt_p_03_n20.log 2>&1 &
 #
-# FIX: conda overrides PATH so python3/python resolve to /opt/conda, not the venv.
-# Use the venv python by absolute path instead.
+# The tag is derived from --var and --alpha automatically:
+#   --var true_p        --alpha 0.3  =>  tag = tilt_p_alpha0.3
+#   --var true_costheta --alpha 0.3  =>  tag = tilt_costheta_alpha0.3
+#   --var both          --alpha 0.3  =>  tag = tilt_both_alpha0.3
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
@@ -17,20 +20,43 @@ if [[ ! -f "${VENV_PYTHON}" ]]; then
     exit 1
 fi
 
+# ── Parse arguments ──────────────────────────────────────────────────────────
+VAR="true_p"
+ALPHA="0.3"
+NITER="10"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --var)    VAR="$2";   shift 2 ;;
+        --alpha)  ALPHA="$2"; shift 2 ;;
+        --niter)  NITER="$2"; shift 2 ;;
+        *)        echo "Unknown argument: $1"; exit 1 ;;
+    esac
+done
+
+# ── Derive tag from --var and --alpha ────────────────────────────────────────
+case "${VAR}" in
+    true_p)        TAG="tilt_p_alpha${ALPHA}" ;;
+    true_costheta) TAG="tilt_costheta_alpha${ALPHA}" ;;
+    both)          TAG="tilt_both_alpha${ALPHA}" ;;
+    *)             echo "ERROR: --var must be true_p, true_costheta, or both"; exit 1 ;;
+esac
+
+DATA_DIR="../FormattedData_SBND/"
+WEIGHTS_DIR="weights_sbnd_fakedata_${TAG}/"
+
 echo "Using python: ${VENV_PYTHON}"
 echo "Python version: $("${VENV_PYTHON}" --version 2>&1)"
 echo "TF version: $("${VENV_PYTHON}" -c 'import tensorflow as tf; print(tf.__version__)')"
 
-TAG="${1:-tilt_alpha0.5}"
-NITER="${2:-10}"
-DATA_DIR="../FormattedData_SBND/"
-WEIGHTS_DIR="weights_sbnd_fakedata_${TAG}/"
-
+echo ""
 echo "=== OmniFold fake-data run ==="
-echo "  TAG:         ${TAG}"
-echo "  NITER:       ${NITER}"
-echo "  WEIGHTS_DIR: ${WEIGHTS_DIR}"
-echo "  DATA_DIR:    ${DATA_DIR}"
+echo "  --var:        ${VAR}"
+echo "  --alpha:      ${ALPHA}"
+echo "  TAG:          ${TAG}"
+echo "  NITER:        ${NITER}"
+echo "  WEIGHTS_DIR:  ${WEIGHTS_DIR}"
+echo "  DATA_DIR:     ${DATA_DIR}"
 
 mkdir -p "${WEIGHTS_DIR}"
 
@@ -68,5 +94,5 @@ echo ""
 
 echo ""
 echo "=== Done. Next steps: ==="
-echo "  ${VENV_PYTHON} sbnd/MakePlots.py validation --tag ${TAG}"
+echo "  ${VENV_PYTHON} sbnd/MakePlots.py validation --var ${VAR} --alpha ${ALPHA}"
 echo "  ${VENV_PYTHON} sbnd/MakePlots.py paper --var both --tag ${TAG}"

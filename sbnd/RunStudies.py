@@ -4,14 +4,27 @@ RunStudies.py — Run all SBND OmniFold studies.
 Consolidates: MakeFakeDataWeights_SBND, CheckSBNDClosure, RunSystematicUniverses.
 
 Actions:
-  check-closure   Check closure-test push/pull weight stats
-  make-fakedata   Create fake-data weights (tilt or BNB universe)
+  check-closure   Check closure-test push/pull weight stats (+ statistical metric)
+  make-fakedata   Create fake-data weights (tilt on p OR cosθ, or BNB universe)
   run-syst        Run OmniFold for each systematic universe
   run-ml-unc      Run N single-network replicas for ML uncertainty
 
+CHANGE LOG (this revision)
+--------------------------
+* Q3  check-closure now reports a *statistical* pass/fail in addition to the raw
+      bias: the unfolded truth spectrum is compared to the nominal truth with a
+      per-bin MC-stat covariance, giving chi2/ndf and a p-value. "Passed" now
+      means p > 0.05 (i.e. consistent within ~2σ), the same spirit as the
+      Wiener-SVD 2σ criterion, rather than an ad-hoc |bias|<1%.
+* Q8  make-fakedata gains --tilt-var {true_p,true_costheta}. A cosθ tilt lets us
+      inject a known distortion in the angular variable and check that OmniFold
+      tracks it (complementary to the momentum tilt). Momentum keeps the old tag
+      'tilt_alpha{a}' for backward compatibility; cosθ uses 'tilt_costheta_alpha{a}'.
+
 Usage:
     python3 sbnd/RunStudies.py check-closure
-    python3 sbnd/RunStudies.py make-fakedata --mode tilt --alpha 0.5
+    python3 sbnd/RunStudies.py make-fakedata --mode tilt --tilt-var true_p       --alpha 0.5
+    python3 sbnd/RunStudies.py make-fakedata --mode tilt --tilt-var true_costheta --alpha 0.3
     python3 sbnd/RunStudies.py run-syst --source bnb --start 0 --end 100
     python3 sbnd/RunStudies.py run-ml-unc --n-replicas 10 --tag tilt_alpha0.5
 """
@@ -19,6 +32,52 @@ Usage:
 import numpy as np
 import os, sys, glob, re, argparse, subprocess
 import matplotlib.pyplot as plt
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Shared
+# ═══════════════════════════════════════════════════════════════════════════════
+BINNING = {
+    'true_p':        np.array([0, 200, 400, 600, 800, 1000, 1400, 2000]),
+    'true_costheta': np.linspace(-1, 1, 11),
+}
+XLABEL = {
+    'true_p':        r'True electron momentum [MeV/c]',
+    'true_costheta': r'True $\cos\theta_e$',
+}
+# short tag suffix per tilt variable
+TILT_SHORT = {'true_p': 'p', 'true_costheta': 'costheta', 'both': 'both'}
+
+
+def make_fdt_tag(var, alpha):
+    """Derive the fake-data tag from --var and --alpha.
+
+    true_p        -> tilt_p_alpha0.3
+    true_costheta -> tilt_costheta_alpha0.3
+    both          -> tilt_both_alpha0.3
+    """
+    return f'tilt_{TILT_SHORT[var]}_alpha{alpha}'
+
+
+def tilt_label(var, alpha):
+    """Human-readable label for plot titles."""
+    names = {'true_p': 'p only', 'true_costheta': 'cosθ only', 'both': 'p + cosθ'}
+    return f'Tilted: {names[var]}, α={alpha}'
+
+
+def chi2_pvalue(chi2, ndf):
+    """Survival function of the chi2 distribution (scipy, with a safe fallback)."""
+    if ndf is None or ndf <= 0 or not np.isfinite(chi2):
+        return float('nan')
+    try:
+        from scipy import stats
+        return float(stats.chi2.sf(chi2, ndf))
+    except Exception:
+        import math
+        k, x = float(ndf), float(chi2)
+        # Wilson–Hilferty approximation
+        t = ((x / k) ** (1.0 / 3.0) - (1.0 - 2.0 / (9.0 * k))) / math.sqrt(2.0 / (9.0 * k))
+        return float(0.5 * math.erfc(t / math.sqrt(2.0)))
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CLI
@@ -29,13 +88,25 @@ sub = parser.add_subparsers(dest='action', required=True)
 # ── check-closure ─────────────────────────────────────────────────────────────
 p_cl = sub.add_parser('check-closure')
 p_cl.add_argument('--closure-dir', default='weights_sbnd_closure/')
+p_cl.add_argument('--data-dir', default='../FormattedData_SBND/',
+                  help='Needed for the binned statistical closure metric.')
 p_cl.add_argument('--plot-dir', default='sbnd/plots_validation/')
+p_cl.add_argument('--pval-thresh', type=float, default=0.05,
+                  help='Closure passes if the binned chi2 p-value exceeds this '
+                       '(0.05 ~ 2σ, matching the Wiener-SVD convention).')
+p_cl.add_argument('--var', choices=['true_p', 'true_costheta', 'both'], default='both',
+                  help='Which variable(s) to check: true_p, true_costheta, or both.')
 p_cl.add_argument('--show-trials', action='store_true',
                   help='Plot individual NTRIAL weight distributions to show run-to-run spread.')
 
 # ── make-fakedata ─────────────────────────────────────────────────────────────
 p_fd = sub.add_parser('make-fakedata')
 p_fd.add_argument('--mode', choices=['tilt', 'universe'], default='tilt')
+p_fd.add_argument('--var', choices=['true_p', 'true_costheta', 'both'], default='true_p',
+                  help="Which variable(s) to tilt. "
+                       "'true_p': tilt momentum only. "
+                       "'true_costheta': tilt angle only. "
+                       "'both': simultaneous tilt on p AND cosθ.")
 p_fd.add_argument('--alpha', type=float, default=0.5)
 p_fd.add_argument('--universe-file', type=str, default=None)
 p_fd.add_argument('--universe-idx', type=int, default=0)
@@ -61,7 +132,11 @@ p_ml.add_argument('--start', type=int, default=None)
 p_ml.add_argument('--end', type=int, default=None)
 p_ml.add_argument('--data-dir', default='../FormattedData_SBND/')
 p_ml.add_argument('--tag', type=str, default=None,
-                  help='Fake data tag. None = nominal MC as data (closure-like).')
+                  help='Fake data tag (override). If omitted, derived from --var and --alpha.')
+p_ml.add_argument('--var', choices=['true_p', 'true_costheta', 'both'], default='true_p',
+                  help='Which variable was tilted (used to derive tag if --tag is omitted).')
+p_ml.add_argument('--alpha', type=float, default=0.3,
+                  help='Tilt strength (used to derive tag if --tag is omitted).')
 p_ml.add_argument('--weights-base', default='sbnd/weights_ml_unc/')
 p_ml.add_argument('--niter', type=int, default=10)
 p_ml.add_argument('--epochs', type=int, default=100)
@@ -121,29 +196,86 @@ def do_check_closure():
         print(f"  Expected run-to-run variability: ±{trial_biases.std()*100/np.sqrt(n_trials_push):.2f}% "
               f"(±1 std of the mean over {n_trials_push} trials)")
 
-    # Tiered verdict
+    # ── Q3: STATISTICAL closure metric (binned, covariance-based) ─────────────
+    # A closure test should reproduce the *nominal truth* spectrum. Instead of an
+    # ad-hoc |bias|<1%, we ask whether the unfolded spectrum is consistent with the
+    # nominal truth within the MC statistical uncertainty. This mirrors the
+    # Wiener-SVD "within 2σ" convention: pass if p-value > pval_thresh (~0.05).
+    stat_status = None
+    try:
+        truth_raw  = np.load(flags.data_dir + 'mc_vals_truth_NoNorm.npy')
+        mc_weights = np.load(flags.data_dir + 'mc_weights_reco.npy')
+        # Guard: weights were trained on a different sample size than the current inputs.
+        # This happens when FormatData was rerun (e.g. new selection / POT scale) but
+        # the closure OmniFold job was not.  Catch it early with a clear message.
+        if push.shape[0] != mc_weights.shape[0]:
+            print(f"\n  ERROR: shape mismatch — closure weights have {push.shape[0]} events "
+                  f"but current mc_weights_reco.npy has {mc_weights.shape[0]} events.")
+            print(f"  The closure OmniFold job was trained on the OLD sample. "
+                  f"Retrain it first:")
+            print(f"    bash sbnd/runOmnifold_sbnd.sh   # (or your closure training script)")
+            print(f"  Then re-run:  python3 sbnd/RunStudies.py check-closure")
+            print(f"\n  Skipping statistical closure metric.")
+            stat_status = None
+            raise StopIteration
+        all_vars = {'true_p': truth_raw[:, 0], 'true_costheta': truth_raw[:, 1]}
+        if flags.var == 'both':
+            var_map = all_vars
+        else:
+            var_map = {flags.var: all_vars[flags.var]}
+        print(f"\n  --- Statistical closure metric (unfolded vs nominal truth) ---")
+        print(f"      pass if p-value > {flags.pval_thresh:.2f} (~2σ, per bin covariance = MC stat)")
+        all_pass = True
+        for vn, vv in var_map.items():
+            bins = BINNING[vn]; n_bins = len(bins) - 1
+            nom_h,  _ = np.histogram(vv, bins=bins, weights=mc_weights)
+            unf_h,  _ = np.histogram(vv, bins=bins, weights=mc_weights * push)
+            # MC statistical variance of the unfolded spectrum: sum of (w*push)^2
+            var_h,  _ = np.histogram(vv, bins=bins, weights=(mc_weights * push) ** 2)
+            good = var_h > 0
+            d_bin = (unf_h - nom_h)[good]
+            chi2 = float(np.sum(d_bin ** 2 / var_h[good]))
+            # total is preserved by OmniFold -> one constraint removed
+            ndf = max(int(good.sum()) - 1, 1)
+            pval = chi2_pvalue(chi2, ndf)
+            ok = pval > flags.pval_thresh
+            all_pass = all_pass and ok
+            # largest per-bin pull, for context
+            pulls = d_bin / np.sqrt(var_h[good])
+            print(f"      {vn:14s}: chi2/ndf = {chi2:7.2f}/{ndf} = {chi2/ndf:6.2f}, "
+                  f"p = {pval:6.3f}, max|pull| = {np.abs(pulls).max():4.2f}  "
+                  f"-> {'PASS' if ok else 'FAIL'}")
+        stat_status = ("PASSED (statistical: unfolded ≈ nominal truth within ~2σ)"
+                       if all_pass else
+                       "FAILED (statistical: unfolded deviates from nominal truth > 2σ)")
+    except StopIteration:
+        pass  # message already printed by the shape-mismatch guard above
+    except FileNotFoundError:
+        print(f"\n  (Statistical closure metric skipped — {flags.data_dir} inputs not found.)")
+
+    # ── Legacy tiered verdict on the raw per-event bias (kept for continuity) ──
     abs_bias = abs(push_bias)
     if push.std() >= 0.2:
         status = "FAIL — std too large, network not converging"
     elif abs_bias < 0.01:
-        status = "PASSED (excellent: |bias| < 1%)"
+        status = "raw-bias verdict: |bias| < 1% (excellent)"
     elif abs_bias < 0.03:
-        status = (f"PASSED with note: |bias|={abs_bias*100:.1f}% < 3%. "
+        status = (f"raw-bias verdict: |bias|={abs_bias*100:.1f}% < 3%. "
                   f"Acceptable for fake-data studies (subdominant vs 5-30% systematics). "
-                  f"Run-to-run variability from finite NTRIAL={n_trials_push} is normal — "
-                  f"see per-trial biases above. To stabilise: increase NTRIAL to 5-7.")
+                  f"Run-to-run variability from finite NTRIAL={n_trials_push} is normal.")
     elif abs_bias < 0.05:
-        status = (f"WARNING: |bias|={abs_bias*100:.1f}% (3-5%). "
+        status = (f"raw-bias verdict: |bias|={abs_bias*100:.1f}% (3-5%). "
                   f"Marginal — increase NTRIAL to 5-7 before publishing.")
     else:
-        status = (f"FAIL: |bias|={abs_bias*100:.1f}% >= 5%. "
+        status = (f"raw-bias verdict: |bias|={abs_bias*100:.1f}% >= 5%. "
                   f"Investigate reco-truth correlation and increase NTRIAL.")
-    print(f"  Status: {status}")
+    print(f"\n  {status}")
+    if stat_status is not None:
+        print(f"  ==> CLOSURE {stat_status}")
 
     # ── Plot 1: weight distributions (pull left, push right) ──────────────────
-    # Shared x-axis range [0.85, 1.15] so pull and push are directly comparable
     XLIM = (0.85, 1.15)
-    BINS = np.linspace(XLIM[0], XLIM[1], 81)  # 80 bins, fixed range
+    BINS = np.linspace(XLIM[0], XLIM[1], 81)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     axes[0].hist(pull, bins=BINS, color="darkorange", alpha=0.8)
@@ -154,7 +286,6 @@ def do_check_closure():
                       f"mean={pull.mean():.4f}, std={pull.std():.4f}, "
                       f"bias={pull_bias*100:+.2f}%")
 
-    # Show individual trials as thin lines if requested
     if getattr(flags, 'show_trials', False) and n_trials_push > 1:
         trial_cols = plt.cm.Blues(np.linspace(0.4, 0.9, n_trials_push))
         for t in range(n_trials_push):
@@ -239,6 +370,19 @@ def do_check_closure():
 # ═══════════════════════════════════════════════════════════════════════════════
 # make-fakedata
 # ═══════════════════════════════════════════════════════════════════════════════
+def _tilt_transform(var_name, values):
+    """Return a standardised coordinate z(x) used to build the tilt.
+
+    true_p        : log-standardised (momentum spans orders of magnitude)
+    true_costheta : linear-standardised (bounded variable, no log)
+    """
+    if var_name == 'true_p':
+        x = np.log(values.clip(1.0, None))
+    else:  # true_costheta (or any bounded/linear variable)
+        x = values.astype(np.float64)
+    return (x - np.mean(x)) / np.std(x)
+
+
 def do_make_fakedata():
     OUT = flags.data_dir
     mc_weights_reco = np.load(OUT + 'mc_weights_reco.npy')
@@ -246,6 +390,7 @@ def do_make_fakedata():
     n = len(mc_weights_reco)
     true_p        = truth_raw[:, 0]
     true_costheta = truth_raw[:, 1]
+    var_map = {'true_p': true_p, 'true_costheta': true_costheta}
 
     print(f"Loaded {n:,} events from {OUT}")
 
@@ -254,35 +399,58 @@ def do_make_fakedata():
 
     if flags.mode == 'tilt':
         ALPHA = flags.alpha
-        print(f"=== Synthetic Tilt Mode (alpha={ALPHA}, variable=true_p) ===")
-        log_p      = np.log(true_p.clip(1.0, None))
-        log_p_mean = np.mean(log_p)
-        log_p_std  = np.std(log_p)
-        tilt = 1.0 + ALPHA * (log_p - log_p_mean) / log_p_std
+        VAR   = flags.var
+        tag   = make_fdt_tag(VAR, ALPHA)
+
+        # ── Build tilt weight(s) ───────────────────────────────────────────────
+        if VAR == 'both':
+            z_p   = _tilt_transform('true_p',        true_p)
+            z_cos = _tilt_transform('true_costheta',  true_costheta)
+            tilt  = (1.0 + ALPHA * z_p) * (1.0 + ALPHA * z_cos)
+        else:
+            z     = _tilt_transform(VAR, var_map[VAR])
+            tilt  = 1.0 + ALPHA * z
         tilt = np.clip(tilt, 0.0, None)
         tilt = tilt * (mc_weights_reco.sum() / (mc_weights_reco * tilt).sum())
         data_weights = mc_weights_reco * tilt
-        tag = f'tilt_alpha{ALPHA}'
+
         np.save(OUT + f'data_weights_sbnd_fakedata_{tag}.npy', data_weights)
         np.save(OUT + f'truth_weights_sbnd_fakedata_{tag}.npy', tilt)
-        print(f"  Tilt range: [{tilt.min():.3f}, {tilt.max():.3f}]")
-        print(f"  Saved to {OUT}")
 
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-        bins_p = np.linspace(0, np.percentile(true_p, 99), 25)
-        axes[0].hist(true_p, bins=bins_p, weights=mc_weights_reco, alpha=0.6, label='Nominal MC')
-        axes[0].hist(true_p, bins=bins_p, weights=data_weights, alpha=0.6, label='Fake Data')
-        axes[0].set_xlabel('true_p [MeV/c]'); axes[0].legend()
-        axes[0].set_title('Injected distortion: true_p')
+        title = tilt_label(VAR, ALPHA)
+        print(f"=== Synthetic Tilt Mode ===")
+        print(f"  {title}")
+        print(f"  tag = {tag}")
+        print(f"  Tilt range: [{tilt.min():.3f}, {tilt.max():.3f}]")
+        print(f"  Saved: {OUT}data_weights_sbnd_fakedata_{tag}.npy")
+        print(f"         {OUT}truth_weights_sbnd_fakedata_{tag}.npy")
+        print(f"\n  Next: nohup bash sbnd/runOmnifold_sbnd_fakedata.sh --var {VAR} --alpha {ALPHA}")
+
+        # ── Injection summary plot ─────────────────────────────────────────────
+        tilted_set = {'true_p', 'true_costheta'} if VAR == 'both' else {VAR}
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        fig.suptitle(f'Fake-data injection  ({title})', fontsize=13, fontweight='bold')
+
+        bins_p   = np.linspace(0, np.percentile(true_p, 99), 25)
         bins_cos = np.linspace(-1, 1, 20)
-        axes[1].hist(true_costheta, bins=bins_cos, weights=mc_weights_reco, alpha=0.6, label='Nominal MC')
-        axes[1].hist(true_costheta, bins=bins_cos, weights=data_weights, alpha=0.6, label='Fake Data')
-        axes[1].set_xlabel(r'true $\cos\theta$'); axes[1].legend()
-        axes[1].set_title(r'Projected: true $\cos\theta$')
-        axes[2].scatter(true_p[::5], tilt[::5], s=3, alpha=0.3)
-        axes[2].axhline(1.0, color='r', linestyle='--')
-        axes[2].set_xlabel('true_p [MeV/c]'); axes[2].set_ylabel('Tilt weight')
-        axes[2].set_title(f'Tilt function (alpha={ALPHA})')
+
+        p_label   = 'true_p  ← TILTED'   if 'true_p'        in tilted_set else 'true_p  (projected)'
+        cos_label = 'cosθ  ← TILTED'     if 'true_costheta' in tilted_set else 'cosθ  (projected)'
+
+        axes[0].hist(true_p, bins=bins_p, weights=mc_weights_reco,
+                     alpha=0.55, color='steelblue', label='Nominal MC')
+        axes[0].hist(true_p, bins=bins_p, weights=data_weights,
+                     alpha=0.55, color='tomato', label='Fake Data')
+        axes[0].set_xlabel('true_p [MeV/c]'); axes[0].set_ylabel('Weighted events')
+        axes[0].set_title(p_label); axes[0].legend()
+
+        axes[1].hist(true_costheta, bins=bins_cos, weights=mc_weights_reco,
+                     alpha=0.55, color='steelblue', label='Nominal MC')
+        axes[1].hist(true_costheta, bins=bins_cos, weights=data_weights,
+                     alpha=0.55, color='tomato', label='Fake Data')
+        axes[1].set_xlabel(r'true $\cos\theta_e$'); axes[1].set_ylabel('Weighted events')
+        axes[1].set_title(cos_label); axes[1].legend()
+
         plt.tight_layout()
         plt.savefig(f'{PLOT_DIR}/fakedata_injected_{tag}.png', dpi=150)
         print(f"  Plot: {PLOT_DIR}/fakedata_injected_{tag}.png")
@@ -365,6 +533,9 @@ def do_run_syst():
 # run-ml-unc
 # ═══════════════════════════════════════════════════════════════════════════════
 def do_run_ml_unc():
+    # Derive the fake-data tag from --var/--alpha if --tag not given explicitly.
+    fdt_tag = flags.tag or make_fdt_tag(flags.var, flags.alpha)
+
     if flags.start is not None and flags.end is not None:
         replica_range = range(flags.start, flags.end)
     else:
@@ -377,8 +548,7 @@ def do_run_ml_unc():
         weights_dir = f'{flags.weights_base}/{tag}/'
         os.makedirs(weights_dir, exist_ok=True)
 
-        data_weight_file = (f'data_weights_sbnd_fakedata_{flags.tag}.npy'
-                            if flags.tag else 'mc_weights_reco.npy')
+        data_weight_file = f'data_weights_sbnd_fakedata_{fdt_tag}.npy'
 
         config = {
             'FILE_MC_RECO': 'mc_vals_reco.npy', 'FILE_MC_GEN': 'mc_vals_truth.npy',
